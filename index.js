@@ -75,7 +75,7 @@ module.exports = function (app) {
     properties: {
       correctionTable: {
         type: 'string',
-        title: 'Correction table (labeled CSV — header row: heel\\bsp,<bsp bins>; each row: <heel angle>,<corrections in knots>)',
+        title: 'Correction table — labeled CSV. Row 1: heel\\bsp,0.5,1.0,1.5,... (BSP bins in knots). Rows 2+: -35,0.00,0.00,... (heel angle in degrees, then one correction value per BSP bin). Values in knots: corrected = raw + correction.',
         default: DEFAULT_TABLE
       }
     }
