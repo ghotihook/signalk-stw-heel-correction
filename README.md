@@ -19,6 +19,31 @@ Then enable the plugin in the Signal K plugin config UI.
 
 ---
 
+## Development workflow
+
+Edit locally on Mac, push to GitHub, pull on the server:
+
+```bash
+# Mac — after making changes
+git add -p
+git commit -m "describe change"
+git push
+
+# Server
+git -C ~/signalk-stw-heel-correction pull && sudo systemctl restart signalk
+```
+
+### Testing a change
+
+To verify the plugin is applying corrections, temporarily add a known offset (e.g. +1 knot) to every cell in the correction table, deploy, and confirm the corrected STW reads ~1 kn higher than the raw instrument value in the Signal K data browser. Revert and redeploy once confirmed.
+
+Enable debug logging for the plugin in the Signal K admin UI to see per-correction log lines:
+```
+STW 1.24 kn, heel -10.3° → correction 0.2050 kn → corrected 1.45 kn
+```
+
+---
+
 ## Configuration
 
 All fields are optional — the plugin ships with a default table for Sakura (Swan 36, AUS 373).
