@@ -124,8 +124,8 @@ module.exports = function (app) {
             if (v.path !== 'navigation.speedThroughWater') continue
             if (v.value == null || !Number.isFinite(v.value)) continue
 
-            const rollData = app.getSelfPath('navigation.attitude.roll')
-            const roll = (rollData != null) ? rollData.value : null
+            const attitudeData = app.getSelfPath('navigation.attitude')
+            const roll = (attitudeData && attitudeData.value != null) ? attitudeData.value.roll : null
             if (roll == null || !Number.isFinite(roll)) {
               app.debug('skipping correction: no valid roll/heel data available')
               continue
