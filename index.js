@@ -101,6 +101,9 @@ module.exports = function (app) {
     correctionTable = (options.correctionTable) ? parseCsvBlock(options.correctionTable) : DEFAULT_CORRECTION_TABLE.map(r => r.slice())
     active = true
 
+    app.debug(`started: ${heelBins.length} heel bins [${heelBins[0]}°..${heelBins[heelBins.length-1]}°], ${bspBins.length} BSP bins [${bspBins[0]}..${bspBins[bspBins.length-1]} kn]`)
+    app.setPluginStatus(`Active — ${heelBins.length}×${bspBins.length} correction table loaded`)
+
     if (!handlerRegistered) {
       app.registerDeltaInputHandler((delta, next) => {
         if (!active) {
@@ -123,12 +126,17 @@ module.exports = function (app) {
 
             const rollData = app.getSelfPath('navigation.attitude.roll')
             const roll = (rollData != null) ? rollData.value : null
-            if (roll == null || !Number.isFinite(roll)) continue
+            if (roll == null || !Number.isFinite(roll)) {
+              app.debug('skipping correction: no valid roll/heel data available')
+              continue
+            }
 
             const stwKn = v.value * MS_TO_KN
             const heelDeg = roll * RAD_TO_DEG
             const correctionKn = bilinear(correctionTable, heelBins, bspBins, heelDeg, stwKn)
             const correctedMs = (stwKn + correctionKn) / MS_TO_KN
+
+            app.debug(`STW ${stwKn.toFixed(2)} kn, heel ${heelDeg.toFixed(1)}° → correction ${correctionKn.toFixed(4)} kn → corrected ${(correctedMs * MS_TO_KN).toFixed(2)} kn`)
 
             app.handleMessage(plugin.id, {
               context: 'vessels.' + app.selfId,
@@ -149,6 +157,8 @@ module.exports = function (app) {
 
   plugin.stop = function () {
     active = false
+    app.debug('stopped')
+    app.setPluginStatus('Stopped')
   }
 
   return plugin
