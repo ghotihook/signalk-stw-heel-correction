@@ -1,5 +1,5 @@
 {
-  "name": "@gh/signalk-stw-heel-correction",
+  "name": "signalk-stw-heel-correction",
   "version": "0.1.0",
   "description": "Corrects speed through water for heel angle using a 2D bilinear interpolation table",
   "main": "index.js",
