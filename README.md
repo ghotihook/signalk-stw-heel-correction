@@ -2,9 +2,7 @@
 
 Signal K plugin that corrects `navigation.speedThroughWater` for heel angle using a 2D bilinear interpolation table.
 
-A paddlewheel or impeller tilts with the boat as it heels, causing the raw STW reading to be inaccurate. This plugin intercepts the raw delta from the instrument, looks up and interpolates a correction from a (heel °, BSP kn) table, and emits the corrected value back to `navigation.speedThroughWater` from the plugin's own source.
-
-After installation, configure Signal K **source priority** for `navigation.speedThroughWater` to prefer `signalk-stw-heel-correction` over the raw instrument source.
+A paddlewheel or impeller tilts with the boat as it heels, causing the raw STW reading to be inaccurate. This plugin intercepts the raw delta from the instrument, looks up and interpolates a correction from a (heel °, BSP kn) table, and emits the corrected value back to `navigation.speedThroughWater` from the plugin's own source. The raw STW value is stripped from the delta stream so downstream apps see only the corrected value.
 
 ---
 
@@ -18,20 +16,6 @@ sudo systemctl restart signalk
 ```
 
 Then enable the plugin in the Signal K plugin config UI.
-
----
-
-## Development workflow
-
-Edit locally, then push to GitHub and pull on the server:
-
-```bash
-# Mac
-git push
-
-# Server
-git -C ~/signalk-stw-heel-correction pull && sudo systemctl restart signalk
-```
 
 ---
 
@@ -57,10 +41,10 @@ Paste a new CSV block into the Correction table field in the plugin config UI. R
 
 The plugin registers a `registerDeltaInputHandler` which fires on every incoming delta before it reaches the Signal K data model. When a delta containing `navigation.speedThroughWater` arrives from an external source (instrument), the plugin:
 
-1. Reads the current `navigation.attitude.roll` from the data model
+1. Reads the current `navigation.attitude` from the data model and extracts roll
 2. Converts STW m/s → knots, roll radians → degrees
 3. Bilinearly interpolates the correction from the table
 4. Emits the corrected value via `handleMessage` under source `signalk-stw-heel-correction`
-5. Calls `next(delta)` so the raw instrument value is also retained in the data model under its original source
+5. Strips the raw `navigation.speedThroughWater` value from the original delta before passing it on, so only the corrected value appears in the stream
 
-The raw instrument value remains available. Source priority determines which value downstream consumers (autopilot, polars, etc.) see.
+Other values in the same delta (e.g. `navigation.speedThroughWaterReferenceType`) are unaffected and pass through normally.
