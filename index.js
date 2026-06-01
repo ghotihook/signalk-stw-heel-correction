@@ -59,7 +59,7 @@ function bilinear(table, heelBins, bspBins, heel, bsp) {
 module.exports = function (app) {
   const plugin = {
     id: 'signalk-stw-heel-correction',
-    name: 'gh - STW Correction',
+    name: 'gh - STW Heel Correction',
     description: 'Corrects navigation.speedThroughWater for heel angle via 2D bilinear interpolation'
   }
 
