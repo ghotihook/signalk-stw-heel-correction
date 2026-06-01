@@ -113,8 +113,7 @@ module.exports = function (app) {
 
         // Skip our own output to avoid processing the corrected value as raw input
         for (const update of (delta.updates || [])) {
-          app.debug('source check: ' + JSON.stringify(update.source))
-          if (update.source && (update.source.$source === plugin.id || update.source.label === plugin.id)) {
+          if (update.source && update.source.label === plugin.id) {
             next(delta)
             return
           }
