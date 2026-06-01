@@ -119,6 +119,8 @@ module.exports = function (app) {
           }
         }
 
+        let corrected = false
+
         for (const update of (delta.updates || [])) {
           for (const v of (update.values || [])) {
             if (v.path !== 'navigation.speedThroughWater') continue
@@ -146,6 +148,16 @@ module.exports = function (app) {
                 values: [{ path: 'navigation.speedThroughWater', value: correctedMs }]
               }]
             })
+
+            corrected = true
+          }
+        }
+
+        if (corrected) {
+          // Strip raw STW from the delta so only the corrected value appears in the stream.
+          // Other values in the delta (e.g. speedThroughWaterReferenceType) still pass through.
+          for (const update of (delta.updates || [])) {
+            update.values = (update.values || []).filter(v => v.path !== 'navigation.speedThroughWater')
           }
         }
 
