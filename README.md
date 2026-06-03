@@ -2,7 +2,7 @@
 
 Signal K plugin that corrects speed through water for heel angle using a 2D bilinear interpolation table.
 
-A paddlewheel or impeller tilts with the boat as it heels, causing the raw STW reading to be inaccurate. This plugin reads `navigation.speedThroughWater` and `navigation.attitude` on every incoming update, looks up and interpolates a correction from a configurable (heel °, BSP kn) table, and emits the result to `navigation.speedThroughWaterCorrected`. The raw `navigation.speedThroughWater` value is unchanged.
+A paddlewheel or impeller tilts with the boat as it heels, causing the raw STW reading to be inaccurate. This plugin subscribes to `navigation.speedThroughWater` from all external sources, looks up and interpolates a correction from a configurable (heel °, BSP kn) table, and emits the corrected value back to `navigation.speedThroughWater` under its own source label. Source priority then determines the canonical value for all consumers.
 
 ---
 
@@ -60,10 +60,13 @@ Correction values are additive: `corrected = raw + correction`. Inputs outside t
 
 ## How it works
 
-1. `registerDeltaInputHandler` fires on every incoming delta
-2. For each value where `path === navigation.speedThroughWater`, the plugin reads the current `navigation.attitude` roll and converts units (m/s → kn, rad → deg)
-3. The correction is bilinearly interpolated from the table at (heel, BSP)
-4. The corrected value is emitted to `navigation.speedThroughWaterCorrected` via `handleMessage`
-5. The original delta passes through unchanged
+The plugin subscribes to `navigation.speedThroughWater` using `subscriptionmanager.subscribe` with `excludeSelf: true`. This routes the subscription through a per-subscription priority engine fed from the unfiltered delta bus, with the plugin's own source masked out. The result is that the plugin always sees raw instrument values, never its own corrected output, and fires continuously on every incoming update.
 
-Reading and writing on separate paths avoids any source priority conflict — the plugin fires on every incoming STW update continuously.
+On each update:
+1. Current `navigation.attitude` roll is read and converted to degrees
+2. STW is converted from m/s to knots
+3. The correction is bilinearly interpolated from the table at (heel °, BSP kn)
+4. The corrected value is emitted to `navigation.speedThroughWater` under the plugin's source label via `handleMessage`
+5. Global source priority determines which value consumers see
+
+Note: do not add `sourcePolicy: 'all'` to the subscription — under `'all'` the server ignores `excludeSelf` and the plugin will see its own output and loop.
