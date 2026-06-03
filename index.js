@@ -110,6 +110,7 @@ module.exports = function (app) {
       unsubscribes,
       (err) => app.setPluginError(err),
       (delta) => {
+        app.debug(`delta: ${(delta.updates || []).map(u => `$source=${u.$source} values=${(u.values || []).map(v => v.path).join(',')}`).join(' | ')}`)
         for (const update of (delta.updates || [])) {
           if (update.$source === plugin.id) continue
           for (const v of (update.values || [])) {
