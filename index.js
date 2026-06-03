@@ -108,6 +108,7 @@ module.exports = function (app) {
       (err) => app.setPluginError(err),
       (delta) => {
         for (const update of (delta.updates || [])) {
+          app.debug(`subscription received source: ${update.source && update.source.label}`)
           for (const v of (update.values || [])) {
             if (v.path !== 'navigation.speedThroughWater') continue
             if (v.value == null || !Number.isFinite(v.value)) continue
