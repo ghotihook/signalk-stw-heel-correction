@@ -103,8 +103,7 @@ module.exports = function (app) {
 
     unsubscribe = app.streambundle.getSelfBus('navigation.speedThroughWater')
       .onValue(v => {
-        app.debug(`STW bus: $source=${v.$source} plugin.id=${plugin.id}`)
-        if (v.$source === plugin.id) return
+        if (v.$source.startsWith(plugin.id)) return
         if (v.value == null || !Number.isFinite(v.value)) return
 
         const attitudeData = app.getSelfPath('navigation.attitude')
