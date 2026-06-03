@@ -145,8 +145,7 @@ module.exports = function (app) {
                 source: { label: plugin.id, type: 'plugin' },
                 timestamp: v.timestamp || update.timestamp || new Date().toISOString(),
                 values: [
-                  { path: 'navigation.speedThroughWater', value: correctedMs },
-                  { path: 'navigation.speedThroughWaterUncorrected', value: v.value }
+                  { path: 'navigation.speedThroughWater', value: correctedMs }
                 ]
               }]
             })
