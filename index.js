@@ -88,8 +88,6 @@ module.exports = function (app) {
     unsubscribes.forEach(f => f())
     unsubscribes = []
 
-    let lastKey = null
-
     const parsed = parseLabeledCsv(options.correctionTable || DEFAULT_TABLE)
     bspBins = parsed.bspBins
     heelBins = parsed.heelBins
@@ -113,10 +111,6 @@ module.exports = function (app) {
       (err) => app.setPluginError(err),
       (delta) => {
         for (const update of (delta.updates || [])) {
-          if (update.$source === plugin.id) continue
-          const key = `${update.$source}:${update.timestamp}`
-          if (key === lastKey) continue
-          lastKey = key
           for (const v of (update.values || [])) {
             if (v.path !== 'navigation.speedThroughWater') continue
             if (v.value == null || !Number.isFinite(v.value)) continue
