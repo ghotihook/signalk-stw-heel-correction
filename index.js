@@ -104,7 +104,7 @@ module.exports = function (app) {
     app.subscriptionmanager.subscribe(
       {
         context: 'vessels.self',
-        excludeSelf: true,
+        sourcePolicy: 'all',
         subscribe: [{ path: 'navigation.speedThroughWater' }]
       },
       unsubscribes,
