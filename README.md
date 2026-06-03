@@ -1,8 +1,8 @@
 # signalk-stw-heel-correction
 
-Signal K plugin that corrects `navigation.speedThroughWater` for heel angle using a 2D bilinear interpolation table.
+Signal K plugin that corrects speed through water for heel angle using a 2D bilinear interpolation table.
 
-A paddlewheel or impeller tilts with the boat as it heels, causing the raw STW reading to be inaccurate. This plugin intercepts the raw delta from the instrument, looks up and interpolates a correction from a (heel °, BSP kn) table, and emits the corrected value back to `navigation.speedThroughWater` from the plugin's own source. The raw STW value is stripped from the delta stream so downstream apps see only the corrected value.
+A paddlewheel or impeller tilts with the boat as it heels, causing the raw STW reading to be inaccurate. This plugin reads `navigation.speedThroughWater` and `navigation.attitude` on every incoming update, looks up and interpolates a correction from a configurable (heel °, BSP kn) table, and emits the result to `navigation.speedThroughWaterCorrected`. The raw `navigation.speedThroughWater` value is unchanged.
 
 ---
 
@@ -11,7 +11,7 @@ A paddlewheel or impeller tilts with the boat as it heels, causing the raw STW r
 ```bash
 git clone git@github.com:ghotihook/signalk-stw-heel-correction ~/signalk-stw-heel-correction
 cd ~/.signalk
-npm install file:/home/alex060/signalk-stw-heel-correction
+npm install ~/signalk-stw-heel-correction
 sudo systemctl restart signalk
 ```
 
@@ -21,55 +21,49 @@ Then enable the plugin in the Signal K plugin config UI.
 
 ## Development workflow
 
-Edit locally on Mac, push to GitHub, pull on the server:
+Edit locally, push to GitHub, pull on the server:
 
 ```bash
 # Mac — after making changes
-git add -p
-git commit -m "describe change"
-git push
+git add -p && git commit -m "describe change" && git push
 
 # Server
 git -C ~/signalk-stw-heel-correction pull && sudo systemctl restart signalk
 ```
 
-### Testing a change
-
-To verify the plugin is applying corrections, temporarily add a known offset (e.g. +1 knot) to every cell in the correction table, deploy, and confirm the corrected STW reads ~1 kn higher than the raw instrument value in the Signal K data browser. Revert and redeploy once confirmed.
-
-Enable debug logging for the plugin in the Signal K admin UI to see per-correction log lines:
+Enable debug logging for the plugin in the Signal K admin UI to see per-update log lines:
 ```
-STW 1.24 kn, heel -10.3° → correction 0.2050 kn → corrected 1.45 kn
+STW 6.00 kn, heel -10.3° → correction 0.2050 kn → corrected 6.21 kn
 ```
 
 ---
 
 ## Configuration
 
-All fields are optional — the plugin ships with a default table for Sakura (Swan 36, AUS 373).
+The plugin ships with a default correction table for Sakura (Swan 36, AUS 373).
 
-| Field | Description |
-|---|---|
-| **BSP bins** | Comma-separated boat speeds in knots that define the table columns |
-| **Heel bins** | Comma-separated heel angles in degrees that define the table rows. Negative = port heel |
-| **Correction table** | CSV block — one row per heel bin, one column per BSP bin. Values are additive corrections in knots: `corrected = raw + correction` |
+**Correction table** — a labeled CSV pasted into the plugin config UI:
 
-The table is bilinearly interpolated between bins. Inputs outside the bin range are clamped to the nearest edge.
+- Row 1: `heel\bsp,0.5,1.0,1.5,...` — BSP bin edges in knots
+- Rows 2+: `<heel angle>,<correction>,<correction>,...` — one row per heel angle in degrees (negative = port heel), one correction value per BSP bin in knots
 
-### Replacing the table
+```
+heel\bsp,0.5,1.0,2.0,3.0
+-10,0.12,0.12,0.20,0.20
+0,0.55,0.54,0.44,0.28
+10,0.14,0.14,0.22,0.16
+```
 
-Paste a new CSV block into the Correction table field in the plugin config UI. Rows must match the heel bins order (top = most negative heel), columns must match the BSP bins order (left = slowest).
+Correction values are additive: `corrected = raw + correction`. Inputs outside the bin range are clamped to the nearest edge. Values between bins are bilinearly interpolated.
 
 ---
 
 ## How it works
 
-The plugin registers a `registerDeltaInputHandler` which fires on every incoming delta before it reaches the Signal K data model. When a delta containing `navigation.speedThroughWater` arrives from an external source (instrument), the plugin:
+1. `registerDeltaInputHandler` fires on every incoming delta
+2. For each value where `path === navigation.speedThroughWater`, the plugin reads the current `navigation.attitude` roll and converts units (m/s → kn, rad → deg)
+3. The correction is bilinearly interpolated from the table at (heel, BSP)
+4. The corrected value is emitted to `navigation.speedThroughWaterCorrected` via `handleMessage`
+5. The original delta passes through unchanged
 
-1. Reads the current `navigation.attitude` from the data model and extracts roll
-2. Converts STW m/s → knots, roll radians → degrees
-3. Bilinearly interpolates the correction from the table
-4. Emits the corrected value via `handleMessage` under source `signalk-stw-heel-correction`
-5. Strips the raw `navigation.speedThroughWater` value from the original delta before passing it on, so only the corrected value appears in the stream
-
-Other values in the same delta (e.g. `navigation.speedThroughWaterReferenceType`) are unaffected and pass through normally.
+Reading and writing on separate paths avoids any source priority conflict — the plugin fires on every incoming STW update continuously.

@@ -1,7 +1,6 @@
 'use strict'
 
-// heel\bsp header row + one data row per heel angle
-// corrected_stw = raw_stw + correction  (positive = paddlewheel under-reads)
+// corrected = raw + correction  (positive correction = paddlewheel under-reads at that heel/bsp)
 const DEFAULT_TABLE = `heel\\bsp,0.5,1.0,1.5,2.0,2.5,3.0,3.5,4.0,4.5,5.0,5.5,6.0,6.5,7.0,7.5,8.0,8.5
 -35,0.0000,0.0000,0.0000,0.0000,0.0000,0.0000,0.0000,0.0000,0.0000,0.0000,0.0000,-0.2640,-0.4746,-0.5039,-0.5047,-0.5047,-0.5047
 -30,0.0000,0.0000,0.0000,0.0000,0.0000,0.0000,0.0000,0.0000,0.0000,0.0000,-0.0761,-0.3019,-0.5147,-0.6905,-0.7250,-0.7264,-0.7264
@@ -23,8 +22,6 @@ const DEFAULT_TABLE = `heel\\bsp,0.5,1.0,1.5,2.0,2.5,3.0,3.5,4.0,4.5,5.0,5.5,6.0
 const MS_TO_KN = 1.94384
 const RAD_TO_DEG = 180 / Math.PI
 
-// Parses a labeled CSV where the first row is "heel\bsp,<bsp bins...>"
-// and each subsequent row is "<heel bin>,<values...>"
 function parseLabeledCsv(s) {
   const rows = s.trim().split(/\r?\n/).map(r => r.split(',').map(c => c.trim()))
   const bspBins = rows[0].slice(1).map(Number)
