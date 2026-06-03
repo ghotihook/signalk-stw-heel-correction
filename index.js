@@ -121,7 +121,14 @@ module.exports = function (app) {
 
           app.debug(`STW ${stwKn.toFixed(2)} kn, heel ${heelDeg.toFixed(1)}° → correction ${correctionKn.toFixed(4)} kn → corrected ${(correctedMs * MS_TO_KN).toFixed(2)} kn`)
 
-          v.value = correctedMs
+          app.handleMessage(plugin.id, {
+            context: 'vessels.' + app.selfId,
+            updates: [{
+              source: { label: plugin.id, type: 'plugin' },
+              timestamp: update.timestamp || new Date().toISOString(),
+              values: [{ path: 'navigation.speedThroughWaterCorrected', value: correctedMs }]
+            }]
+          })
         }
       }
 
