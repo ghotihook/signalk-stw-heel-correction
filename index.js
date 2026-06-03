@@ -85,6 +85,9 @@ module.exports = function (app) {
   }
 
   plugin.start = function (options) {
+    unsubscribes.forEach(f => f())
+    unsubscribes = []
+
     const parsed = parseLabeledCsv(options.correctionTable || DEFAULT_TABLE)
     bspBins = parsed.bspBins
     heelBins = parsed.heelBins
