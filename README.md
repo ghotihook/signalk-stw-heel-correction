@@ -60,13 +60,16 @@ Correction values are additive: `corrected = raw + correction`. Inputs outside t
 
 ## How it works
 
-The plugin subscribes to `navigation.speedThroughWater` using `subscriptionmanager.subscribe` with `excludeSelf: true`. This routes the subscription through a per-subscription priority engine fed from the unfiltered delta bus, with the plugin's own source masked out. The result is that the plugin always sees raw instrument values, never its own corrected output, and fires continuously on every incoming update.
+The plugin uses `subscriptionmanager.subscribe` with `sourcePolicy: 'all'`, which delivers every incoming delta from every source at full rate with no priority cascade on the input. This is the correct pattern for a corrector that needs to process every raw sample.
 
 On each update:
-1. Current `navigation.attitude` roll is read and converted to degrees
-2. STW is converted from m/s to knots
-3. The correction is bilinearly interpolated from the table at (heel °, BSP kn)
-4. The corrected value is emitted to `navigation.speedThroughWater` under the plugin's source label via `handleMessage`
-5. Global source priority determines which value consumers see
+1. The incoming source is checked — if it is the plugin's own output it is skipped (`u.$source === plugin.id`)
+2. Current `navigation.attitude` roll is read and converted to degrees
+3. STW is converted from m/s to knots
+4. The correction is bilinearly interpolated from the table at (heel °, BSP kn)
+5. The corrected value is emitted to `navigation.speedThroughWater` with no source object, so the server sets `$source` to the bare plugin id
+6. Global source priority determines which value consumers see
 
-Note: do not add `sourcePolicy: 'all'` to the subscription — under `'all'` the server ignores `excludeSelf` and the plugin will see its own output and loop.
+**Why not `excludeSelf`?** `excludeSelf` runs a priority cascade on the input feed and delivers a single ranked value — correct for a plugin that wants the preferred upstream source with its own output masked out, but wrong for a full-rate corrector. With `excludeSelf` and the plugin ranked above the instrument, the cascade sees the plugin's (excluded) output as the preferred source that never arrives and holds the real source as a fallback, stalling input until the fallback timeout. `sourcePolicy: 'all'` bypasses the cascade entirely.
+
+**SignalK version note:** `excludeSelf` is not present in v2.28.0-beta.2. The `u.$source === plugin.id` guard is the correct workaround and remains harmless on newer builds.
