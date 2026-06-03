@@ -101,36 +101,32 @@ module.exports = function (app) {
     app.debug(`started: ${heelBins.length} heel bins [${heelBins[0]}°..${heelBins[heelBins.length-1]}°], ${bspBins.length} BSP bins [${bspBins[0]}..${bspBins[bspBins.length-1]} kn]`)
     app.setPluginStatus(`Active — ${heelBins.length}×${bspBins.length} correction table loaded`)
 
-    unsubscribe = app.streambundle.getSelfBus('navigation.speedThroughWater')
-      .onValue(v => {
-        if (v.$source.startsWith(plugin.id)) return
-        if (v.value == null || !Number.isFinite(v.value)) return
+    unsubscribe = app.registerDeltaInputHandler((delta, next) => {
+      for (const update of (delta.updates || [])) {
+        for (const v of (update.values || [])) {
+          if (v.path !== 'navigation.speedThroughWater') continue
+          if (v.value == null || !Number.isFinite(v.value)) continue
 
-        const attitudeData = app.getSelfPath('navigation.attitude')
-        const roll = (attitudeData && attitudeData.value != null) ? attitudeData.value.roll : null
-        if (roll == null || !Number.isFinite(roll)) {
-          app.debug('skipping correction: no valid roll/heel data available')
-          return
+          const attitudeData = app.getSelfPath('navigation.attitude')
+          const roll = (attitudeData && attitudeData.value != null) ? attitudeData.value.roll : null
+          if (roll == null || !Number.isFinite(roll)) {
+            app.debug('skipping correction: no valid roll/heel data available')
+            continue
+          }
+
+          const stwKn = v.value * MS_TO_KN
+          const heelDeg = roll * RAD_TO_DEG
+          const correctionKn = bilinear(correctionTable, heelBins, bspBins, heelDeg, stwKn)
+          const correctedMs = (stwKn + correctionKn) / MS_TO_KN
+
+          app.debug(`STW ${stwKn.toFixed(2)} kn, heel ${heelDeg.toFixed(1)}° → correction ${correctionKn.toFixed(4)} kn → corrected ${(correctedMs * MS_TO_KN).toFixed(2)} kn`)
+
+          v.value = correctedMs
         }
+      }
 
-        const stwKn = v.value * MS_TO_KN
-        const heelDeg = roll * RAD_TO_DEG
-        const correctionKn = bilinear(correctionTable, heelBins, bspBins, heelDeg, stwKn)
-        const correctedMs = (stwKn + correctionKn) / MS_TO_KN
-
-        app.debug(`STW ${stwKn.toFixed(2)} kn, heel ${heelDeg.toFixed(1)}° → correction ${correctionKn.toFixed(4)} kn → corrected ${(correctedMs * MS_TO_KN).toFixed(2)} kn`)
-
-        app.handleMessage(plugin.id, {
-          context: 'vessels.' + app.selfId,
-          updates: [{
-            source: { label: plugin.id, type: 'plugin' },
-            timestamp: v.timestamp || new Date().toISOString(),
-            values: [
-              { path: 'navigation.speedThroughWater', value: correctedMs }
-            ]
-          }]
-        })
-      })
+      next(delta)
+    })
   }
 
   plugin.stop = function () {
