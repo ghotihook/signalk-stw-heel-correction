@@ -101,6 +101,8 @@ module.exports = function (app) {
     app.debug(`started: ${heelBins.length} heel bins [${heelBins[0]}°..${heelBins[heelBins.length-1]}°], ${bspBins.length} BSP bins [${bspBins[0]}..${bspBins[bspBins.length-1]} kn]`)
     app.setPluginStatus(`Active — ${heelBins.length}×${bspBins.length} correction table loaded`)
 
+    let lastKey = null
+
     app.subscriptionmanager.subscribe(
       {
         context: 'vessels.self',
@@ -112,6 +114,9 @@ module.exports = function (app) {
       (delta) => {
         for (const update of (delta.updates || [])) {
           if (update.$source === plugin.id) continue
+          const key = `${update.$source}:${update.timestamp}`
+          if (key === lastKey) continue
+          lastKey = key
           for (const v of (update.values || [])) {
             if (v.path !== 'navigation.speedThroughWater') continue
             if (v.value == null || !Number.isFinite(v.value)) continue
