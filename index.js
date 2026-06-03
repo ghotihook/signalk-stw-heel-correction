@@ -111,6 +111,7 @@ module.exports = function (app) {
       (err) => app.setPluginError(err),
       (delta) => {
         for (const update of (delta.updates || [])) {
+          app.debug(`rcv: $source=${update.$source} plugin.id=${plugin.id} self=${update.$source === plugin.id}`)
           for (const v of (update.values || [])) {
             if (v.path !== 'navigation.speedThroughWater') continue
             if (v.value == null || !Number.isFinite(v.value)) continue
