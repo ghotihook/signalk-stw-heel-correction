@@ -102,6 +102,7 @@ module.exports = function (app) {
     app.setPluginStatus(`Active — ${heelBins.length}×${bspBins.length} correction table loaded`)
 
     let lastKey = null
+    const ownTimestamps = new Set()
 
     app.subscriptionmanager.subscribe(
       {
@@ -113,7 +114,14 @@ module.exports = function (app) {
       (err) => app.setPluginError(err),
       (delta) => {
         for (const update of (delta.updates || [])) {
+          // Primary loop guard: skip corrections we published (reliable, source-name-independent)
+          if (update.timestamp && ownTimestamps.has(update.timestamp)) {
+            ownTimestamps.delete(update.timestamp)
+            continue
+          }
+          // Secondary guard: skip if $source happens to match (fast path when it works)
           if (update.$source === plugin.id) continue
+
           const key = `${update.$source}:${update.timestamp}`
           if (key === lastKey) continue
           lastKey = key
@@ -135,10 +143,12 @@ module.exports = function (app) {
 
             app.debug(`STW ${stwKn.toFixed(2)} kn, heel ${heelDeg.toFixed(1)}° → correction ${correctionKn.toFixed(4)} kn → corrected ${(correctedMs * MS_TO_KN).toFixed(2)} kn`)
 
+            const outTs = new Date().toISOString()
+            ownTimestamps.add(outTs)
             app.handleMessage(plugin.id, {
               context: 'vessels.' + app.selfId,
               updates: [{
-                timestamp: update.timestamp || new Date().toISOString(),
+                timestamp: outTs,
                 values: [{ path: 'navigation.speedThroughWater', value: correctedMs }]
               }]
             })
