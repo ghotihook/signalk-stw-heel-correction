@@ -91,6 +91,11 @@ module.exports = function (app) {
         title: 'UDP destination port',
         default: 1183
       },
+      outputPath: {
+        type: 'string',
+        title: 'Signal K output path',
+        default: 'navigation.correctedSpeedThroughWater'
+      },
       correctionTable: {
         type: 'string',
         title: 'Correction table — labeled CSV. Row 1: heel\\bsp,0.5,1.0,1.5,... (BSP bins in knots). Rows 2+: -35,0.00,0.00,... (heel angle in degrees, then one correction value per BSP bin). Values in knots: corrected = raw + correction.',
@@ -117,8 +122,9 @@ module.exports = function (app) {
       return
     }
 
-    const udpHost = options.udpHost || '255.255.255.255'
-    const udpPort = options.udpPort || 1183
+    const udpHost    = options.udpHost    || '255.255.255.255'
+    const udpPort    = options.udpPort    || 1183
+    const outputPath = options.outputPath || 'navigation.correctedSpeedThroughWater'
 
     udpSocket = dgram.createSocket('udp4')
     udpSocket.bind(() => {
@@ -151,6 +157,15 @@ module.exports = function (app) {
           const sentence = buildVHW(correctedKn)
           const buf = Buffer.from(sentence)
           udpSocket.send(buf, 0, buf.length, udpPort, udpHost)
+
+          app.handleMessage(plugin.id, {
+            context: 'vessels.' + app.selfId,
+            updates: [{
+              source: { label: plugin.id, type: 'plugin' },
+              timestamp: new Date().toISOString(),
+              values: [{ path: outputPath, value: correctedKn / MS_TO_KN }]
+            }]
+          })
         }
       }
       next(delta)
