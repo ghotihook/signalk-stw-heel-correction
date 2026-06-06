@@ -110,7 +110,7 @@ module.exports = function (app) {
     unsubscribes = []
 
     const parsed = parseLabeledCsv(options.correctionTable || DEFAULT_TABLE)
-    const { bspBins, heelBins, correctionTable } = parsed
+    const { bspBins, heelBins, table: correctionTable } = parsed
 
     if (correctionTable.length !== heelBins.length || correctionTable.some(r => r.length !== bspBins.length)) {
       app.setPluginError('Correction table dimensions do not match bin counts — check CSV')
