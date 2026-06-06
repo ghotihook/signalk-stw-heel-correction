@@ -75,7 +75,7 @@ module.exports = function (app) {
     description: 'Corrects navigation.speedThroughWater for heel angle and outputs corrected value as NMEA0183 XDR over UDP'
   }
 
-  let unsubscribes = []
+  let unregisterHandler = null
   let udpSocket = null
 
   plugin.schema = {
@@ -107,8 +107,7 @@ module.exports = function (app) {
   }
 
   plugin.start = function (options) {
-    unsubscribes.forEach(f => f())
-    unsubscribes = []
+    if (unregisterHandler) { unregisterHandler(); unregisterHandler = null }
 
     const parsed = parseLabeledCsv(options.correctionTable || DEFAULT_TABLE)
     const { bspBins, heelBins, table: correctionTable } = parsed
@@ -129,45 +128,37 @@ module.exports = function (app) {
     app.debug(`started: ${heelBins.length}×${bspBins.length} table, sending XDR to ${udpHost}:${udpPort}`)
     app.setPluginStatus(`Active — sending CORRECTED_STW XDR to ${udpHost}:${udpPort}`)
 
-    app.subscriptionmanager.subscribe(
-      {
-        context: 'vessels.self',
-        subscribe: [{ path: 'navigation.speedThroughWater' }]
-      },
-      unsubscribes,
-      (err) => app.setPluginError(err),
-      (delta) => {
-        for (const update of (delta.updates || [])) {
-          for (const v of (update.values || [])) {
-            if (v.path !== 'navigation.speedThroughWater') continue
-            if (v.value == null || !Number.isFinite(v.value)) continue
+    unregisterHandler = app.registerDeltaInputHandler((delta, next) => {
+      for (const update of (delta.updates || [])) {
+        for (const v of (update.values || [])) {
+          if (v.path !== 'navigation.speedThroughWater') continue
+          if (v.value == null || !Number.isFinite(v.value)) continue
 
-            const attitudeData = app.getSelfPath('navigation.attitude')
-            const roll = (attitudeData && attitudeData.value != null) ? attitudeData.value.roll : null
-            if (roll == null || !Number.isFinite(roll)) {
-              app.debug('skipping correction: no valid roll/heel data available')
-              continue
-            }
-
-            const stwKn = v.value * MS_TO_KN
-            const heelDeg = roll * RAD_TO_DEG
-            const correctionKn = bilinear(correctionTable, heelBins, bspBins, heelDeg, stwKn)
-            const correctedKn = stwKn + correctionKn
-
-            app.debug(`STW ${stwKn.toFixed(2)} kn, heel ${heelDeg.toFixed(1)}° → correction ${correctionKn.toFixed(4)} kn → corrected ${correctedKn.toFixed(2)} kn`)
-
-            const sentence = buildVHW(correctedKn)
-            const buf = Buffer.from(sentence)
-            udpSocket.send(buf, 0, buf.length, udpPort, udpHost)
+          const attitudeData = app.getSelfPath('navigation.attitude')
+          const roll = (attitudeData && attitudeData.value != null) ? attitudeData.value.roll : null
+          if (roll == null || !Number.isFinite(roll)) {
+            app.debug('skipping correction: no valid roll/heel data available')
+            continue
           }
+
+          const stwKn = v.value * MS_TO_KN
+          const heelDeg = roll * RAD_TO_DEG
+          const correctionKn = bilinear(correctionTable, heelBins, bspBins, heelDeg, stwKn)
+          const correctedKn = stwKn + correctionKn
+
+          app.debug(`STW ${stwKn.toFixed(2)} kn, heel ${heelDeg.toFixed(1)}° → correction ${correctionKn.toFixed(4)} kn → corrected ${correctedKn.toFixed(2)} kn`)
+
+          const sentence = buildVHW(correctedKn)
+          const buf = Buffer.from(sentence)
+          udpSocket.send(buf, 0, buf.length, udpPort, udpHost)
         }
       }
-    )
+      next(delta)
+    })
   }
 
   plugin.stop = function () {
-    unsubscribes.forEach(f => f())
-    unsubscribes = []
+    if (unregisterHandler) { unregisterHandler(); unregisterHandler = null }
     if (udpSocket) {
       udpSocket.close()
       udpSocket = null
