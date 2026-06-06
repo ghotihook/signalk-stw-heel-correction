@@ -1,5 +1,7 @@
 'use strict'
 
+const dgram = require('dgram')
+
 // corrected = raw + correction  (positive correction = paddlewheel under-reads at that heel/bsp)
 const DEFAULT_TABLE = `heel\\bsp,0.5,1.0,1.5,2.0,2.5,3.0,3.5,4.0,4.5,5.0,5.5,6.0,6.5,7.0,7.5,8.0,8.5
 -35,0.0000,0.0000,0.0000,0.0000,0.0000,0.0000,0.0000,0.0000,0.0000,0.0000,0.0000,-0.2640,-0.4746,-0.5039,-0.5047,-0.5047,-0.5047
@@ -34,8 +36,6 @@ function parseLabeledCsv(s) {
   return { bspBins, heelBins, table }
 }
 
-// Returns [i0, i1, t] where bins[i0] <= v <= bins[i1] and t is the interpolation weight.
-// Clamps to the bin range edges.
 function clampedBracket(bins, v) {
   if (v <= bins[0]) return [0, 0, 0]
   if (v >= bins[bins.length - 1]) return [bins.length - 1, bins.length - 1, 0]
@@ -56,19 +56,40 @@ function bilinear(table, heelBins, bspBins, heel, bsp) {
   )
 }
 
+function nmeaChecksum(body) {
+  let cs = 0
+  for (let i = 0; i < body.length; i++) cs ^= body.charCodeAt(i)
+  return cs.toString(16).toUpperCase().padStart(2, '0')
+}
+
+function buildXDR(speedKn) {
+  const body = `IIXDR,S,${speedKn.toFixed(2)},N,CORRECTED_STW`
+  return `$${body}*${nmeaChecksum(body)}\r\n`
+}
+
 module.exports = function (app) {
   const plugin = {
     id: 'signalk-stw-heel-correction',
     name: 'gh - STW Heel Correction',
-    description: 'Corrects navigation.speedThroughWater for heel angle via 2D bilinear interpolation'
+    description: 'Corrects navigation.speedThroughWater for heel angle and outputs corrected value as NMEA0183 XDR over UDP'
   }
 
   let unsubscribes = []
-  let bspBins, heelBins, correctionTable
+  let udpSocket = null
 
   plugin.schema = {
     type: 'object',
     properties: {
+      udpHost: {
+        type: 'string',
+        title: 'UDP destination host',
+        default: '255.255.255.255'
+      },
+      udpPort: {
+        type: 'number',
+        title: 'UDP destination port',
+        default: 1183
+      },
       correctionTable: {
         type: 'string',
         title: 'Correction table — labeled CSV. Row 1: heel\\bsp,0.5,1.0,1.5,... (BSP bins in knots). Rows 2+: -35,0.00,0.00,... (heel angle in degrees, then one correction value per BSP bin). Values in knots: corrected = raw + correction.',
@@ -89,42 +110,33 @@ module.exports = function (app) {
     unsubscribes = []
 
     const parsed = parseLabeledCsv(options.correctionTable || DEFAULT_TABLE)
-    bspBins = parsed.bspBins
-    heelBins = parsed.heelBins
-    correctionTable = parsed.table
+    const { bspBins, heelBins, correctionTable } = parsed
 
     if (correctionTable.length !== heelBins.length || correctionTable.some(r => r.length !== bspBins.length)) {
       app.setPluginError('Correction table dimensions do not match bin counts — check CSV')
       return
     }
 
-    app.debug(`started: ${heelBins.length} heel bins [${heelBins[0]}°..${heelBins[heelBins.length-1]}°], ${bspBins.length} BSP bins [${bspBins[0]}..${bspBins[bspBins.length-1]} kn]`)
-    app.setPluginStatus(`Active — ${heelBins.length}×${bspBins.length} correction table loaded`)
+    const udpHost = options.udpHost || '255.255.255.255'
+    const udpPort = options.udpPort || 1183
 
-    let lastKey = null
-    const ownTimestamps = new Set()
+    udpSocket = dgram.createSocket('udp4')
+    udpSocket.bind(() => {
+      udpSocket.setBroadcast(true)
+    })
+
+    app.debug(`started: ${heelBins.length}×${bspBins.length} table, sending XDR to ${udpHost}:${udpPort}`)
+    app.setPluginStatus(`Active — sending CORRECTED_STW XDR to ${udpHost}:${udpPort}`)
 
     app.subscriptionmanager.subscribe(
       {
         context: 'vessels.self',
-        sourcePolicy: 'all',
         subscribe: [{ path: 'navigation.speedThroughWater' }]
       },
       unsubscribes,
       (err) => app.setPluginError(err),
       (delta) => {
         for (const update of (delta.updates || [])) {
-          // Primary loop guard: skip corrections we published (reliable, source-name-independent)
-          if (update.timestamp && ownTimestamps.has(update.timestamp)) {
-            ownTimestamps.delete(update.timestamp)
-            continue
-          }
-          // Secondary guard: skip if $source happens to match (fast path when it works)
-          if (update.$source === plugin.id) continue
-
-          const key = `${update.$source}:${update.timestamp}`
-          if (key === lastKey) continue
-          lastKey = key
           for (const v of (update.values || [])) {
             if (v.path !== 'navigation.speedThroughWater') continue
             if (v.value == null || !Number.isFinite(v.value)) continue
@@ -139,19 +151,13 @@ module.exports = function (app) {
             const stwKn = v.value * MS_TO_KN
             const heelDeg = roll * RAD_TO_DEG
             const correctionKn = bilinear(correctionTable, heelBins, bspBins, heelDeg, stwKn)
-            const correctedMs = (stwKn + correctionKn) / MS_TO_KN
+            const correctedKn = stwKn + correctionKn
 
-            app.debug(`STW ${stwKn.toFixed(2)} kn, heel ${heelDeg.toFixed(1)}° → correction ${correctionKn.toFixed(4)} kn → corrected ${(correctedMs * MS_TO_KN).toFixed(2)} kn`)
+            app.debug(`STW ${stwKn.toFixed(2)} kn, heel ${heelDeg.toFixed(1)}° → correction ${correctionKn.toFixed(4)} kn → corrected ${correctedKn.toFixed(2)} kn`)
 
-            const outTs = new Date().toISOString()
-            ownTimestamps.add(outTs)
-            app.handleMessage(plugin.id, {
-              context: 'vessels.' + app.selfId,
-              updates: [{
-                timestamp: outTs,
-                values: [{ path: 'navigation.speedThroughWater', value: correctedMs }]
-              }]
-            })
+            const sentence = buildXDR(correctedKn)
+            const buf = Buffer.from(sentence)
+            udpSocket.send(buf, 0, buf.length, udpPort, udpHost)
           }
         }
       }
@@ -161,6 +167,10 @@ module.exports = function (app) {
   plugin.stop = function () {
     unsubscribes.forEach(f => f())
     unsubscribes = []
+    if (udpSocket) {
+      udpSocket.close()
+      udpSocket = null
+    }
     app.debug('stopped')
     app.setPluginStatus('Stopped')
   }
