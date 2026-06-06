@@ -62,8 +62,9 @@ function nmeaChecksum(body) {
   return cs.toString(16).toUpperCase().padStart(2, '0')
 }
 
-function buildXDR(speedKn) {
-  const body = `IIXDR,S,${speedKn.toFixed(2)},N,CORRECTED_STW`
+function buildVHW(speedKn) {
+  const speedKmh = speedKn * 1.852
+  const body = `IIVHW,,T,,M,${speedKn.toFixed(2)},N,${speedKmh.toFixed(2)},K`
   return `$${body}*${nmeaChecksum(body)}\r\n`
 }
 
@@ -155,7 +156,7 @@ module.exports = function (app) {
 
             app.debug(`STW ${stwKn.toFixed(2)} kn, heel ${heelDeg.toFixed(1)}° → correction ${correctionKn.toFixed(4)} kn → corrected ${correctedKn.toFixed(2)} kn`)
 
-            const sentence = buildXDR(correctedKn)
+            const sentence = buildVHW(correctedKn)
             const buf = Buffer.from(sentence)
             udpSocket.send(buf, 0, buf.length, udpPort, udpHost)
           }
