@@ -2,7 +2,10 @@
 
 Signal K plugin that corrects speed through water for heel angle using a 2D bilinear interpolation table.
 
-A paddlewheel or impeller tilts with the boat as it heels, causing the raw STW reading to be inaccurate. This plugin subscribes to `navigation.speedThroughWater` from all external sources, looks up and interpolates a correction from a configurable (heel °, BSP kn) table, and emits the corrected value back to `navigation.speedThroughWater` under its own source label. Source priority then determines the canonical value for all consumers.
+A paddlewheel or impeller tilts with the boat as it heels, causing the raw STW reading to be inaccurate. This plugin watches incoming `navigation.speedThroughWater` deltas, looks up and interpolates a correction from a configurable (heel °, BSP kn) table, and emits the corrected value two ways:
+
+- as an **NMEA0183 `VHW` sentence broadcast over UDP** (for instrument displays / other consumers on the network), and
+- as a **Signal K delta** on a configurable path (default `navigation.correctedSpeedThroughWater`), sourced under the plugin id.
 
 ---
 
@@ -42,6 +45,13 @@ STW 6.00 kn, heel -10.3° → correction 0.2050 kn → corrected 6.21 kn
 
 The plugin ships with a default correction table for Sakura (Swan 36, AUS 373).
 
+| Setting | Default | Description |
+|---|---|---|
+| **UDP destination host** | `255.255.255.255` | Where the `VHW` sentence is broadcast/sent |
+| **UDP destination port** | `1183` | UDP port for the `VHW` sentence |
+| **Signal K output path** | `navigation.correctedSpeedThroughWater` | Path the corrected delta is published to |
+| **Correction table** | (Sakura default) | Labeled CSV, see below |
+
 **Correction table** — a labeled CSV pasted into the plugin config UI:
 
 - Row 1: `heel\bsp,0.5,1.0,1.5,...` — BSP bin edges in knots
@@ -60,16 +70,14 @@ Correction values are additive: `corrected = raw + correction`. Inputs outside t
 
 ## How it works
 
-The plugin uses `subscriptionmanager.subscribe` with `sourcePolicy: 'all'`, which delivers every incoming delta from every source at full rate with no priority cascade on the input. This is the correct pattern for a corrector that needs to process every raw sample.
+The plugin registers a delta input handler (`app.registerDeltaInputHandler`), which sees every incoming delta at full rate before it enters the data model. The handler inspects each value and acts only on `navigation.speedThroughWater`; all deltas (matching or not) are passed through unchanged via `next(delta)`.
 
-On each update:
-1. The incoming source is checked — if it is the plugin's own output it is skipped (`u.$source === plugin.id`)
-2. Current `navigation.attitude` roll is read and converted to degrees
-3. STW is converted from m/s to knots
-4. The correction is bilinearly interpolated from the table at (heel °, BSP kn)
-5. The corrected value is emitted to `navigation.speedThroughWater` with no source object, so the server sets `$source` to the bare plugin id
-6. Global source priority determines which value consumers see
+On each `navigation.speedThroughWater` value:
+1. The STW value is skipped if null or non-finite
+2. Current `navigation.attitude` roll is read via `getSelfPath`; the correction is skipped if roll is missing/non-finite, **or if the attitude data is more than 1 s old** (stale-sensor guard, so the last-known heel is not applied indefinitely)
+3. STW is converted from m/s to knots, roll from radians to degrees
+4. The correction is bilinearly interpolated from the table at (heel °, BSP kn); inputs outside the bin range are clamped to the nearest edge
+5. `corrected = max(0, raw + correction)` — the result is floored at zero
+6. The corrected value is emitted as a `VHW` sentence over UDP (once the socket is bound and broadcast-enabled) and as a Signal K delta on the configured output path
 
-**Why not `excludeSelf`?** `excludeSelf` runs a priority cascade on the input feed and delivers a single ranked value — correct for a plugin that wants the preferred upstream source with its own output masked out, but wrong for a full-rate corrector. With `excludeSelf` and the plugin ranked above the instrument, the cascade sees the plugin's (excluded) output as the preferred source that never arrives and holds the real source as a fallback, stalling input until the fallback timeout. `sourcePolicy: 'all'` bypasses the cascade entirely.
-
-**SignalK version note:** `excludeSelf` is not present in v2.28.0-beta.2. The `u.$source === plugin.id` guard is the correct workaround and remains harmless on newer builds.
+Because the output is published to a **separate** path (not back onto `navigation.speedThroughWater`), there is no internal feedback loop. Note that the `VHW` UDP output uses the conventional NMEA STW path — if you feed that UDP stream back into Signal K as `navigation.speedThroughWater`, the plugin will re-correct its own output. Keep the UDP output on a separate consumer.

@@ -126,9 +126,14 @@ module.exports = function (app) {
     const udpPort    = options.udpPort    || 1183
     const outputPath = options.outputPath || 'navigation.correctedSpeedThroughWater'
 
+    let udpReady = false
     udpSocket = dgram.createSocket('udp4')
+    udpSocket.on('error', (err) => {
+      app.error(`UDP socket error: ${err.message}`)
+    })
     udpSocket.bind(() => {
       udpSocket.setBroadcast(true)
+      udpReady = true
     })
 
     app.debug(`started: ${heelBins.length}×${bspBins.length} table, sending XDR to ${udpHost}:${udpPort}`)
@@ -147,16 +152,24 @@ module.exports = function (app) {
             continue
           }
 
+          const attitudeAge = attitudeData.timestamp ? (Date.now() - new Date(attitudeData.timestamp).getTime()) : Infinity
+          if (!(attitudeAge < 1000)) {
+            app.debug(`skipping correction: attitude data stale (${attitudeAge} ms old)`)
+            continue
+          }
+
           const stwKn = v.value * MS_TO_KN
           const heelDeg = roll * RAD_TO_DEG
           const correctionKn = bilinear(correctionTable, heelBins, bspBins, heelDeg, stwKn)
-          const correctedKn = stwKn + correctionKn
+          const correctedKn = Math.max(0, stwKn + correctionKn)
 
           app.debug(`STW ${stwKn.toFixed(2)} kn, heel ${heelDeg.toFixed(1)}° → correction ${correctionKn.toFixed(4)} kn → corrected ${correctedKn.toFixed(2)} kn`)
 
-          const sentence = buildVHW(correctedKn)
-          const buf = Buffer.from(sentence)
-          udpSocket.send(buf, 0, buf.length, udpPort, udpHost)
+          if (udpReady) {
+            const sentence = buildVHW(correctedKn)
+            const buf = Buffer.from(sentence)
+            udpSocket.send(buf, 0, buf.length, udpPort, udpHost)
+          }
 
           app.handleMessage(plugin.id, {
             context: 'vessels.' + app.selfId,
