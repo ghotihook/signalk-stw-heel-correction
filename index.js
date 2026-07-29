@@ -24,6 +24,7 @@ const DEFAULT_TABLE = `heel\\bsp,0.5,1.0,1.5,2.0,2.5,3.0,3.5,4.0,4.5,5.0,5.5,6.0
 const MS_TO_KN = 1.94384
 const RAD_TO_DEG = 180 / Math.PI
 const OUTPUT_PATH = 'navigation.speedThroughWaterCorrected'
+const DEFAULT_MIN_SPEED_KN = 0.5
 
 function parseLabeledCsv(s) {
   const rows = s.trim().split(/\r?\n/).map(r => r.split(',').map(c => c.trim()))
@@ -92,6 +93,11 @@ module.exports = function (app) {
         title: 'UDP destination port',
         default: 1183
       },
+      minSpeedKn: {
+        type: 'number',
+        title: 'Minimum speed (knots) to apply the correction — below this the raw STW is passed through uncorrected',
+        default: DEFAULT_MIN_SPEED_KN
+      },
       correctionTable: {
         type: 'string',
         title: 'Correction table — labeled CSV. Row 1: heel\\bsp,0.5,1.0,1.5,... (BSP bins in knots). Rows 2+: -35,0.00,0.00,... (heel angle in degrees, then one correction value per BSP bin). Values in knots: corrected = raw + correction.',
@@ -120,6 +126,7 @@ module.exports = function (app) {
 
     const udpHost    = options.udpHost    || '255.255.255.255'
     const udpPort    = options.udpPort    || 1183
+    const minSpeedKn = Number.isFinite(options.minSpeedKn) ? options.minSpeedKn : DEFAULT_MIN_SPEED_KN
 
     let udpReady = false
     udpSocket = dgram.createSocket('udp4')
@@ -131,7 +138,7 @@ module.exports = function (app) {
       udpReady = true
     })
 
-    app.debug(`started: ${heelBins.length}×${bspBins.length} table, publishing ${OUTPUT_PATH}, sending VHW to ${udpHost}:${udpPort}`)
+    app.debug(`started: ${heelBins.length}×${bspBins.length} table, min speed ${minSpeedKn} kn, publishing ${OUTPUT_PATH}, sending VHW to ${udpHost}:${udpPort}`)
     app.setPluginStatus(`Active — publishing ${OUTPUT_PATH}, sending VHW to ${udpHost}:${udpPort}`)
 
     unregisterHandler = app.registerDeltaInputHandler((delta, next) => {
@@ -155,10 +162,15 @@ module.exports = function (app) {
 
           const stwKn = v.value * MS_TO_KN
           const heelDeg = roll * RAD_TO_DEG
-          const correctionKn = bilinear(correctionTable, heelBins, bspBins, heelDeg, stwKn)
+          const belowMinSpeed = stwKn < minSpeedKn
+          const correctionKn = belowMinSpeed ? 0 : bilinear(correctionTable, heelBins, bspBins, heelDeg, stwKn)
           const correctedKn = Math.max(0, stwKn + correctionKn)
 
-          app.debug(`STW ${stwKn.toFixed(2)} kn, heel ${heelDeg.toFixed(1)}° → correction ${correctionKn.toFixed(4)} kn → corrected ${correctedKn.toFixed(2)} kn`)
+          if (belowMinSpeed) {
+            app.debug(`STW ${stwKn.toFixed(2)} kn below minimum ${minSpeedKn} kn → passing through uncorrected`)
+          } else {
+            app.debug(`STW ${stwKn.toFixed(2)} kn, heel ${heelDeg.toFixed(1)}° → correction ${correctionKn.toFixed(4)} kn → corrected ${correctedKn.toFixed(2)} kn`)
+          }
 
           app.handleMessage(plugin.id, {
             updates: [{

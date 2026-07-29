@@ -49,6 +49,7 @@ The plugin ships with a default correction table for Sakura (Swan 36, AUS 373).
 |---|---|---|
 | **UDP destination host** | `255.255.255.255` | Where the `VHW` sentence is broadcast/sent |
 | **UDP destination port** | `1183` | UDP port for the `VHW` sentence |
+| **Minimum speed (knots)** | `0.5` | Below this raw STW, no correction is applied — `corrected = raw`. Still published and sent over UDP. |
 | **Correction table** | (Sakura default) | Labeled CSV, see below |
 
 **Correction table** — a labeled CSV pasted into the plugin config UI:
@@ -75,7 +76,7 @@ On each `navigation.speedThroughWater` value:
 1. The STW value is skipped if null or non-finite
 2. Current `navigation.attitude` roll is read via `getSelfPath`; the correction is skipped if roll is missing/non-finite, **or if the attitude data is more than 1 s old** (stale-sensor guard, so the last-known heel is not applied indefinitely)
 3. STW is converted from m/s to knots, roll from radians to degrees
-4. The correction is bilinearly interpolated from the table at (heel °, BSP kn); inputs outside the bin range are clamped to the nearest edge
+4. If STW is below the configured minimum speed, the correction is forced to zero (`corrected = raw`); otherwise it is bilinearly interpolated from the table at (heel °, BSP kn), with inputs outside the bin range clamped to the nearest edge
 5. `corrected = max(0, raw + correction)` — the result is floored at zero
 6. The corrected value is published to `navigation.speedThroughWaterCorrected` via `app.handleMessage` (converted back to m/s, carrying the source delta's timestamp)
 7. The corrected value is emitted as a `VHW` sentence over UDP (once the socket is bound and broadcast-enabled)
