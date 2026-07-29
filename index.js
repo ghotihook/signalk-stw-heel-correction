@@ -24,7 +24,7 @@ const DEFAULT_TABLE = `heel\\bsp,0.5,1.0,1.5,2.0,2.5,3.0,3.5,4.0,4.5,5.0,5.5,6.0
 const MS_TO_KN = 1.94384
 const RAD_TO_DEG = 180 / Math.PI
 const OUTPUT_PATH = 'navigation.speedThroughWaterCorrected'
-const DEFAULT_MIN_SPEED_KN = 0.5
+const DEFAULT_MIN_SPEED_KN = 1.0
 
 function parseLabeledCsv(s) {
   const rows = s.trim().split(/\r?\n/).map(r => r.split(',').map(c => c.trim()))

@@ -49,7 +49,7 @@ The plugin ships with a default correction table for Sakura (Swan 36, AUS 373).
 |---|---|---|
 | **UDP destination host** | `255.255.255.255` | Where the `VHW` sentence is broadcast/sent |
 | **UDP destination port** | `1183` | UDP port for the `VHW` sentence |
-| **Minimum speed (knots)** | `0.5` | Below this raw STW, no correction is applied — `corrected = raw`. Still published and sent over UDP. |
+| **Minimum speed (knots)** | `1.0` | Below this raw STW, no correction is applied — `corrected = raw`. Still published and sent over UDP. |
 | **Correction table** | (Sakura default) | Labeled CSV, see below |
 
 **Correction table** — a labeled CSV pasted into the plugin config UI:
