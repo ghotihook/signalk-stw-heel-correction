@@ -23,6 +23,7 @@ const DEFAULT_TABLE = `heel\\bsp,0.5,1.0,1.5,2.0,2.5,3.0,3.5,4.0,4.5,5.0,5.5,6.0
 
 const MS_TO_KN = 1.94384
 const RAD_TO_DEG = 180 / Math.PI
+const OUTPUT_PATH = 'navigation.speedThroughWaterCorrected'
 
 function parseLabeledCsv(s) {
   const rows = s.trim().split(/\r?\n/).map(r => r.split(',').map(c => c.trim()))
@@ -72,7 +73,7 @@ module.exports = function (app) {
   const plugin = {
     id: 'signalk-stw-heel-correction',
     name: 'gh - STW Heel Correction',
-    description: 'Corrects navigation.speedThroughWater for heel angle and outputs corrected value as NMEA0183 XDR over UDP'
+    description: `Corrects navigation.speedThroughWater for heel angle, publishes ${OUTPUT_PATH} and outputs the corrected value as an NMEA0183 VHW sentence over UDP`
   }
 
   let unregisterHandler = null
@@ -130,8 +131,8 @@ module.exports = function (app) {
       udpReady = true
     })
 
-    app.debug(`started: ${heelBins.length}×${bspBins.length} table, sending XDR to ${udpHost}:${udpPort}`)
-    app.setPluginStatus(`Active — sending CORRECTED_STW XDR to ${udpHost}:${udpPort}`)
+    app.debug(`started: ${heelBins.length}×${bspBins.length} table, publishing ${OUTPUT_PATH}, sending VHW to ${udpHost}:${udpPort}`)
+    app.setPluginStatus(`Active — publishing ${OUTPUT_PATH}, sending VHW to ${udpHost}:${udpPort}`)
 
     unregisterHandler = app.registerDeltaInputHandler((delta, next) => {
       for (const update of (delta.updates || [])) {
@@ -158,6 +159,13 @@ module.exports = function (app) {
           const correctedKn = Math.max(0, stwKn + correctionKn)
 
           app.debug(`STW ${stwKn.toFixed(2)} kn, heel ${heelDeg.toFixed(1)}° → correction ${correctionKn.toFixed(4)} kn → corrected ${correctedKn.toFixed(2)} kn`)
+
+          app.handleMessage(plugin.id, {
+            updates: [{
+              timestamp: update.timestamp,
+              values: [{ path: OUTPUT_PATH, value: correctedKn / MS_TO_KN }]
+            }]
+          })
 
           if (udpReady) {
             const sentence = buildVHW(correctedKn)

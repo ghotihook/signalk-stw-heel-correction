@@ -2,7 +2,10 @@
 
 Signal K plugin that corrects speed through water for heel angle using a 2D bilinear interpolation table.
 
-A paddlewheel or impeller tilts with the boat as it heels, causing the raw STW reading to be inaccurate. This plugin watches incoming `navigation.speedThroughWater` deltas, looks up and interpolates a correction from a configurable (heel °, BSP kn) table, and emits the corrected value as an **NMEA0183 `VHW` sentence broadcast over UDP** (for instrument displays / other consumers on the network).
+A paddlewheel or impeller tilts with the boat as it heels, causing the raw STW reading to be inaccurate. This plugin watches incoming `navigation.speedThroughWater` deltas, looks up and interpolates a correction from a configurable (heel °, BSP kn) table, and outputs the corrected value two ways:
+
+- as a Signal K delta on **`navigation.speedThroughWaterCorrected`** (m/s, sourced to this plugin)
+- as an **NMEA0183 `VHW` sentence broadcast over UDP** (for instrument displays / other consumers on the network)
 
 ---
 
@@ -74,6 +77,9 @@ On each `navigation.speedThroughWater` value:
 3. STW is converted from m/s to knots, roll from radians to degrees
 4. The correction is bilinearly interpolated from the table at (heel °, BSP kn); inputs outside the bin range are clamped to the nearest edge
 5. `corrected = max(0, raw + correction)` — the result is floored at zero
-6. The corrected value is emitted as a `VHW` sentence over UDP (once the socket is bound and broadcast-enabled)
+6. The corrected value is published to `navigation.speedThroughWaterCorrected` via `app.handleMessage` (converted back to m/s, carrying the source delta's timestamp)
+7. The corrected value is emitted as a `VHW` sentence over UDP (once the socket is bound and broadcast-enabled)
+
+The plugin never writes to `navigation.speedThroughWater` itself, so the raw sensor value stays intact and there is no feedback loop from its own Signal K output.
 
 Note that the `VHW` UDP output uses the conventional NMEA STW path — if you feed that UDP stream back into Signal K as `navigation.speedThroughWater`, the plugin will re-correct its own output. Keep the UDP output on a separate consumer.
