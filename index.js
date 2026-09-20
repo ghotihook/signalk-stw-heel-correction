@@ -26,6 +26,18 @@ const CORRECTED_PATH = 'navigation.speedThroughWaterCorrected'
 const DEFAULT_MIN_SPEED_KN = 1.0
 const ATTITUDE_MAX_AGE_MS = 1000
 const STATUS_INTERVAL_MS = 1000
+// Bounds for sanity-checking sensor input. Anything outside these is a fault, not a
+// reading, and the correction table has nothing meaningful to say about it.
+const MAX_PLAUSIBLE_STW_KN = 60
+const MAX_PLAUSIBLE_HEEL_DEG = 90
+// An attitude timestamp ahead of ours by more than this means the clocks disagree,
+// so the age check cannot be trusted.
+const MAX_CLOCK_SKEW_MS = 1000
+// A published value must differ from its input by at least this (m/s) before it is
+// worth remembering for echo detection. Converting m/s to knots and back is not
+// bit-exact, so without this a zero correction records float noise as an "output"
+// and the next identical raw sample gets mistaken for an echo of it.
+const ECHO_MIN_DELTA_MS = 1e-6
 
 // A blank cell means "no data for this heel/speed combination" — typically a corner
 // of the grid the boat never occupies. Extend the nearest known value into it rather
@@ -66,10 +78,57 @@ function fillGaps(table) {
   return table
 }
 
+// Tables get written from either end — a bow-view table often runs from positive
+// heel down to negative. Either is unambiguous, so accept both and reverse if
+// needed, but reject an order that cannot be interpreted and duplicates that would
+// make interpolation ambiguous.
+function axisOrder(bins, label) {
+  for (let i = 1; i < bins.length; i++) {
+    if (bins.indexOf(bins[i]) !== i) throw new Error(`${label} ${bins[i]} appears more than once`)
+  }
+  if (bins.length < 2) return 'asc'
+  if (bins.every((b, i) => i === 0 || b > bins[i - 1])) return 'asc'
+  if (bins.every((b, i) => i === 0 || b < bins[i - 1])) return 'desc'
+  throw new Error(
+    `${label}s must be in order, either smallest first or largest first — got ${bins.join(', ')}`
+  )
+}
+
+// Tables arrive pasted out of spreadsheets and documents, so undo the usual
+// transport damage before reading anything: a byte order mark, quoted cells, a
+// typographic minus sign and degree marks.
+function cleanCell(c) {
+  return c
+    .trim()
+    .replace(/^"(.*)"$/, '$1')
+    .replace(/\u2212/g, '-')
+    .replace(/\u00b0/g, '')
+    .trim()
+}
+
+// Copying a range straight out of a spreadsheet gives tabs rather than commas, and
+// some locales export semicolons, so take the separator from the header line.
+function splitRows(s) {
+  const lines = s.replace(/^\ufeff/, '').trim().split(/\r?\n/)
+  const header = lines[0] || ''
+  const sep = header.includes(',') ? ','
+    : header.includes('\t') ? '\t'
+    : header.includes(';') ? ';'
+    : ','
+  const rows = lines.map(l => l.split(sep).map(cleanCell)).filter(r => r.some(c => c !== ''))
+
+  // A trailing separator on every line shows up as an empty last column. Only drop
+  // it when the header is empty there too, since a data row may legitimately end on
+  // a blank cell.
+  while (rows.length > 0 && rows[0].length > 1 &&
+         rows.every(r => r[r.length - 1] === '')) {
+    rows.forEach(r => r.pop())
+  }
+  return rows
+}
+
 function parseLabeledCsv(s) {
-  const rows = s.trim().split(/\r?\n/)
-    .map(r => r.split(',').map(c => c.trim()))
-    .filter(r => r.some(c => c !== ''))
+  const rows = splitRows(s)
 
   if (rows.length < 2) {
     throw new Error('expected a header row of BSP bins and at least one heel row')
@@ -108,6 +167,15 @@ function parseLabeledCsv(s) {
       }
       return n
     }))
+  }
+
+  if (axisOrder(bspBins, 'BSP bin') === 'desc') {
+    bspBins.reverse()
+    table.forEach(row => row.reverse())
+  }
+  if (axisOrder(heelBins, 'heel angle') === 'desc') {
+    heelBins.reverse()
+    table.reverse()
   }
 
   return { bspBins, heelBins, table: fillGaps(table) }
@@ -179,6 +247,7 @@ module.exports = function (app) {
 
   plugin.start = function (options) {
     stopEverything()
+    options = options || {}
 
     let bspBins, heelBins, correctionTable
     try {
@@ -276,9 +345,23 @@ module.exports = function (app) {
           }
 
           const stwKn = v.value * MS_TO_KN
+          // A negative or absurd speed through water is a sensor fault. Publishing a
+          // floored or passed-through version of it would put this plugin's source,
+          // which the user has ranked above the sensor, behind the bad number.
+          if (stwKn < 0 || stwKn > MAX_PLAUSIBLE_STW_KN) {
+            reportState('badstw', `Not publishing — raw STW of ${stwKn.toFixed(1)} kn is not plausible, ${fallback}`)
+            app.debug(`raw STW ${stwKn.toFixed(2)} kn outside 0..${MAX_PLAUSIBLE_STW_KN} kn — going silent`)
+            continue
+          }
 
+          // Normally a leaf object with .value, but tolerate an unwrapped attitude so
+          // a shape difference shows up as a wrong reading rather than as a plugin
+          // that silently never corrects.
           const attitudeData = app.getSelfPath('navigation.attitude')
-          const roll = (attitudeData && attitudeData.value != null) ? attitudeData.value.roll : null
+          const attitudeValue = (attitudeData && attitudeData.value != null)
+            ? attitudeData.value
+            : attitudeData
+          const roll = (attitudeValue && typeof attitudeValue === 'object') ? attitudeValue.roll : null
           const attitudeAge = (attitudeData && attitudeData.timestamp)
             ? (Date.now() - new Date(attitudeData.timestamp).getTime())
             : Infinity
@@ -296,8 +379,20 @@ module.exports = function (app) {
             app.debug(`attitude stale (${attitudeAge} ms) — going silent`)
             continue
           }
+          // A timestamp well ahead of ours means the clocks disagree, so the age
+          // check above proves nothing and the heel could be arbitrarily old.
+          if (attitudeAge < -MAX_CLOCK_SKEW_MS) {
+            reportState('skew', `Not publishing — heel timestamp is ahead of server time, ${fallback}`)
+            app.debug(`attitude timestamp ${-attitudeAge} ms in the future — going silent`)
+            continue
+          }
 
           const heelDeg = roll * RAD_TO_DEG
+          if (Math.abs(heelDeg) > MAX_PLAUSIBLE_HEEL_DEG) {
+            reportState('badheel', `Not publishing — heel of ${heelDeg.toFixed(0)}° is not plausible, ${fallback}`)
+            app.debug(`heel ${heelDeg.toFixed(1)}° beyond ±${MAX_PLAUSIBLE_HEEL_DEG}° — going silent (is roll being published in degrees rather than radians?)`)
+            continue
+          }
           let correctionKn = 0
           if (stwKn < minSpeedKn) {
             reportState('slow', `Not correcting — ${stwKn.toFixed(1)} kn is below the ${minSpeedKn} kn minimum, publishing raw`)
@@ -312,7 +407,9 @@ module.exports = function (app) {
           const correctedKn = Math.max(0, stwKn + correctionKn)
           const correctedMs = correctedKn / MS_TO_KN
 
-          if (writesStandardPath && correctedMs !== v.value) noteOutput(correctedMs)
+          if (writesStandardPath && Math.abs(correctedMs - v.value) > ECHO_MIN_DELTA_MS) {
+            noteOutput(correctedMs)
+          }
 
           // No source object: the server stamps $source with plugin.id, which is what
           // both the loop guard above and the user's Source Priorities entry match on.
@@ -385,3 +482,6 @@ module.exports = function (app) {
 
   return plugin
 }
+
+// Exposed for the test suite only; not part of the Signal K plugin API.
+module.exports._internals = { parseLabeledCsv, fillGaps, clampedBracket, bilinear, DEFAULT_TABLE }

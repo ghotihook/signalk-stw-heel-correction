@@ -64,6 +64,16 @@ STW 6.00 kn, heel -10.3° → correction 0.2050 kn → corrected 6.21 kn
 
 ---
 
+## Tests
+
+```bash
+npm test          # node --test test/
+```
+
+Covers table parsing and the paste-damage cases, interpolation and clamping, the output-path settings, both loop guards, the sensor-plausibility rules and the subscribe retry.
+
+---
+
 ## Reading the status line
 
 The plugin's status in the admin UI says what it is doing right now, refreshed about once a second:
@@ -75,6 +85,9 @@ The plugin's status in the admin UI says what it is doing right now, refreshed a
 | `Not correcting — 0.6 kn is below the 1 kn minimum, publishing raw` | Too slow to correct; the raw value is still being published |
 | `Not publishing — no heel data, raw source in use` | No usable heel, so the plugin has gone quiet and priorities have fallen back |
 | `Not publishing — heel data stale, raw source in use` | Heel data older than 1 s, same behaviour |
+| `Not publishing — heel timestamp is ahead of server time, …` | The attitude source's clock disagrees with the server's, so its age cannot be trusted |
+| `Not publishing — heel of 172° is not plausible, …` | Heel beyond ±90°. Usually means roll is being published in degrees where Signal K expects radians |
+| `Not publishing — raw STW of -5.0 kn is not plausible, …` | A negative or absurd speed from the sensor |
 | `Correction table: …` (error) | The table could not be parsed; the message names the offending cell |
 
 ---
@@ -103,7 +116,9 @@ heel\bsp,0.5,1.0,2.0,3.0
 
 Correction values are additive: `corrected = raw + correction`. Inputs outside the bin range are clamped to the nearest edge. Values between bins are bilinearly interpolated.
 
-Whitespace padding is ignored, so an aligned table pastes in as-is, and the header's first cell is a label you can write however you like (`heel\bsp`, `heel\adj_stw`, …).
+The header's first cell is a label you can write however you like (`heel\bsp`, `heel\adj_stw`, …). Rows may run in either direction — smallest heel first or largest first — and so may the BSP bins; a table written the other way up is reversed on load rather than rejected. Bins must not repeat, since that would make interpolation ambiguous.
+
+Tables usually arrive pasted out of a spreadsheet, so the usual transport damage is handled: tab or semicolon separators, CRLF line endings, a UTF-8 byte order mark, quoted cells, alignment padding, blank lines, a trailing separator on every line, a typographic minus sign (`−`) and degree marks on the heel column.
 
 **Blank cells mean "no data here"** — typically a corner of the grid the boat never occupies, like 35° of heel at half a knot:
 
@@ -132,6 +147,17 @@ The plugin subscribes to `navigation.speedThroughWater` via `app.subscriptionman
 4. If STW is below the configured minimum speed the correction is forced to zero (`corrected = raw`); otherwise it is bilinearly interpolated from the table at (heel °, BSP kn), with inputs outside the bin range clamped to the nearest edge
 5. `corrected = max(0, raw + correction)` — the result is floored at zero
 6. The corrected value is published to the configured output path(s) via `app.handleMessage(plugin.id, ...)`, carrying the source delta's timestamp
+
+### Bad sensor data
+
+The plugin refuses to pass on a reading it does not believe, because on the standard path its source is ranked *above* the sensor — republishing a glitch would put this plugin's name on it and hide the raw value underneath.
+
+- Speed through water must be between 0 and 60 kn. Negative or absurd values are dropped, not floored or passed through.
+- Heel must be within ±90°. Beyond that the boat is inverted and the table means nothing; in practice this catches roll published in degrees rather than radians.
+- Attitude must be no more than 1 s old, and not dated in the future by more than 1 s — a timestamp ahead of the server's means the clocks disagree and the age check proves nothing.
+- Null, `NaN` and infinite values are dropped wherever they appear.
+
+In every one of these cases the plugin publishes nothing, which on the standard path means source priorities serve the raw sensor instead.
 
 **When it cannot correct, it goes silent.** Missing STW, missing heel and stale heel all mean the plugin simply stops publishing. The plugin never republishes a value it has not improved. The status line in the admin UI reports which state it is in.
 
