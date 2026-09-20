@@ -112,13 +112,13 @@ The plugin's status in the admin UI says what it is doing right now, refreshed a
 
 ## Configuration
 
-The plugin ships with a default correction table for Sakura (Swan 36, AUS 373).
+The plugin ships with a default correction table as a worked example. The correction is specific to your hull and to how the paddlewheel is mounted, so measure your own rather than sailing on the default.
 
 | Setting | Default | Description |
 |---|---|---|
 | **Output path** | `navigation.speedThroughWater` | Standard path, separate corrected path, or both — see above |
 | **Minimum speed (knots)** | `1.0` | Below this raw STW, no correction is applied — `corrected = raw`. Still published, so the plugin does not flap in and out around the threshold. |
-| **Correction table** | (Sakura default) | Labeled CSV, see below |
+| **Correction table** | (built-in example) | Labeled CSV, see below |
 
 **Correction table** — a labeled CSV pasted into the plugin config UI:
 
