@@ -22,6 +22,7 @@ const DEFAULT_TABLE = `heel\\bsp,0.5,1.0,1.5,2.0,2.5,3.0,3.5,4.0,4.5,5.0,5.5,6.0
 const MS_TO_KN = 1.94384
 const RAD_TO_DEG = 180 / Math.PI
 const STW_PATH = 'navigation.speedThroughWater'
+const CORRECTED_PATH = 'navigation.speedThroughWaterCorrected'
 const DEFAULT_MIN_SPEED_KN = 1.0
 const ATTITUDE_MAX_AGE_MS = 1000
 
@@ -70,6 +71,17 @@ module.exports = function (app) {
   plugin.schema = {
     type: 'object',
     properties: {
+      outputPath: {
+        type: 'string',
+        title: 'Where to publish the corrected value',
+        enum: ['standard', 'corrected', 'both'],
+        enumNames: [
+          `${STW_PATH} — republished under this plugin's source, ranked by Source Priorities (recommended)`,
+          `${CORRECTED_PATH} — a separate path, leaving the raw value untouched`,
+          'Both paths'
+        ],
+        default: 'standard'
+      },
       minSpeedKn: {
         type: 'number',
         title: 'Minimum speed (knots) to apply the correction — below this the raw STW is passed through uncorrected',
@@ -103,6 +115,27 @@ module.exports = function (app) {
 
     const minSpeedKn = Number.isFinite(options.minSpeedKn) ? options.minSpeedKn : DEFAULT_MIN_SPEED_KN
 
+    const outputPath = options.outputPath || 'standard'
+    const outputPaths =
+      outputPath === 'corrected' ? [CORRECTED_PATH]
+      : outputPath === 'both' ? [STW_PATH, CORRECTED_PATH]
+      : [STW_PATH]
+    // Only an output on STW_PATH can feed back into our own input.
+    const writesStandardPath = outputPaths.includes(STW_PATH)
+
+    if (outputPaths.includes(CORRECTED_PATH)) {
+      // CORRECTED_PATH is not in the Signal K schema, so consumers have no units for
+      // it unless we say so.
+      app.handleMessage(plugin.id, {
+        updates: [{
+          meta: [{
+            path: CORRECTED_PATH,
+            value: { units: 'm/s', description: 'Speed through water, corrected for heel angle' }
+          }]
+        }]
+      })
+    }
+
     // Loop guard. The server sets $source to plugin.id on deltas we publish with no
     // explicit source object, so an exact match is the documented check — but this
     // plugin has previously been bitten by a $source that did not match exactly, and
@@ -125,6 +158,13 @@ module.exports = function (app) {
     function isOwnEcho(ms) {
       return recentOutputs.some(o => Math.abs(o - ms) < 1e-12)
     }
+
+    const silentSuffix = writesStandardPath
+      ? ', falling back to raw source'
+      : `, ${CORRECTED_PATH} will go stale`
+    const correctingStatus = writesStandardPath
+      ? `Correcting → ${outputPaths.join(' + ')} — rank this plugin above the sensor in Source Priorities`
+      : `Correcting → ${CORRECTED_PATH}`
 
     let lastState = null
     function reportState(state, detail) {
@@ -165,12 +205,12 @@ module.exports = function (app) {
           // source priorities fall back to the raw sensor rather than republishing a
           // value we have not improved.
           if (roll == null || !Number.isFinite(roll)) {
-            reportState('noroll', 'Silent — no valid heel data, falling back to raw source')
+            reportState('noroll', `Silent — no valid heel data${silentSuffix}`)
             app.debug('no valid roll/heel data — going silent')
             continue
           }
           if (!(attitudeAge < ATTITUDE_MAX_AGE_MS)) {
-            reportState('stale', 'Silent — heel data stale, falling back to raw source')
+            reportState('stale', `Silent — heel data stale${silentSuffix}`)
             app.debug(`attitude stale (${attitudeAge} ms) — going silent`)
             continue
           }
@@ -181,21 +221,21 @@ module.exports = function (app) {
             app.debug(`STW ${stwKn.toFixed(2)} kn below minimum ${minSpeedKn} kn — passing through uncorrected`)
           } else {
             correctionKn = bilinear(correctionTable, heelBins, bspBins, roll * RAD_TO_DEG, stwKn)
-            reportState('correcting', `Correcting ${STW_PATH} — rank this plugin above the sensor in Source Priorities`)
+            reportState('correcting', correctingStatus)
             app.debug(`STW ${stwKn.toFixed(2)} kn, heel ${(roll * RAD_TO_DEG).toFixed(1)}° → correction ${correctionKn.toFixed(4)} kn → corrected ${Math.max(0, stwKn + correctionKn).toFixed(2)} kn`)
           }
 
           const correctedKn = Math.max(0, stwKn + correctionKn)
           const correctedMs = correctedKn / MS_TO_KN
 
-          if (correctedMs !== v.value) noteOutput(correctedMs)
+          if (writesStandardPath && correctedMs !== v.value) noteOutput(correctedMs)
 
           // No source object: the server stamps $source with plugin.id, which is what
           // both the loop guard above and the user's Source Priorities entry match on.
           app.handleMessage(plugin.id, {
             updates: [{
               timestamp: update.timestamp,
-              values: [{ path: STW_PATH, value: correctedMs }]
+              values: outputPaths.map(path => ({ path, value: correctedMs }))
             }]
           })
         }
@@ -233,8 +273,8 @@ module.exports = function (app) {
       retryTimer = setTimeout(() => trySubscribe(attempt + 1), 500)
     }
 
-    app.debug(`started: ${heelBins.length}×${bspBins.length} table, min speed ${minSpeedKn} kn, republishing ${STW_PATH} as "${plugin.id}"`)
-    app.setPluginStatus(`Starting — republishing ${STW_PATH} as "${plugin.id}"`)
+    app.debug(`started: ${heelBins.length}×${bspBins.length} table, min speed ${minSpeedKn} kn, publishing ${outputPaths.join(' + ')} as "${plugin.id}"`)
+    app.setPluginStatus(`Starting — publishing ${outputPaths.join(' + ')} as "${plugin.id}"`)
     trySubscribe(0)
   }
 

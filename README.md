@@ -6,6 +6,8 @@ A paddlewheel or impeller tilts with the boat as it heels, causing the raw STW r
 
 You then rank this plugin above the raw sensor in the server's **Source Priorities**. Every consumer — displays, logbook, autopilot, anything reading `navigation.speedThroughWater` — gets the corrected value with no reconfiguration, while the raw sensor value stays visible in the data model under its own source for comparison and calibration.
 
+Alternatively it can publish to a separate `navigation.speedThroughWaterCorrected` path, leaving the raw value alone — see **Output path** below.
+
 ---
 
 ## Installation (server — once)
@@ -19,11 +21,23 @@ sudo systemctl restart signalk
 
 Then enable the plugin in the Signal K plugin config UI.
 
+### Output path
+
+| Setting | What it does |
+|---|---|
+| **`navigation.speedThroughWater`** (default) | Republishes on the standard path under this plugin's source. Requires a Source Priorities entry (below). Every existing consumer picks it up with no reconfiguration. |
+| **`navigation.speedThroughWaterCorrected`** | Publishes to a separate path and leaves the raw value untouched. No priority setup needed, but every consumer must be pointed at the new path by hand. |
+| **Both paths** | Publishes to both at once. Useful for comparing raw against corrected on the water before committing to the standard path. |
+
+The corrected path is not in the Signal K schema, so when it is in use the plugin publishes `meta` for it (`units: m/s`) — without that, consumers have no way to know how to display it.
+
 ### Required: set the source priority
 
 The plugin publishes under the source `signalk-stw-heel-correction`. **Until you rank it above your paddlewheel source, consumers may still show the raw value.**
 
 In the admin UI: **Server → Source Priorities** → add `navigation.speedThroughWater` → put `signalk-stw-heel-correction` above the instrument source.
+
+This applies to the **standard** and **both** output settings. With the corrected-path-only setting there is no priority to configure.
 
 Priorities also cover the plugin going quiet — if it is disabled, the server restarts, or the heel sensor drops out, consumers fall back to the raw sensor, so STW never goes away entirely.
 
@@ -54,6 +68,7 @@ The plugin ships with a default correction table for Sakura (Swan 36, AUS 373).
 
 | Setting | Default | Description |
 |---|---|---|
+| **Output path** | `navigation.speedThroughWater` | Standard path, separate corrected path, or both — see above |
 | **Minimum speed (knots)** | `1.0` | Below this raw STW, no correction is applied — `corrected = raw`. Still published, so the plugin does not flap in and out around the threshold. |
 | **Correction table** | (Sakura default) | Labeled CSV, see below |
 
@@ -82,9 +97,11 @@ The plugin subscribes to `navigation.speedThroughWater` via `app.subscriptionman
 3. STW is converted from m/s to knots, roll from radians to degrees
 4. If STW is below the configured minimum speed the correction is forced to zero (`corrected = raw`); otherwise it is bilinearly interpolated from the table at (heel °, BSP kn), with inputs outside the bin range clamped to the nearest edge
 5. `corrected = max(0, raw + correction)` — the result is floored at zero
-6. The corrected value is published to `navigation.speedThroughWater` via `app.handleMessage(plugin.id, ...)`, carrying the source delta's timestamp
+6. The corrected value is published to the configured output path(s) via `app.handleMessage(plugin.id, ...)`, carrying the source delta's timestamp
 
-**When it cannot correct, it goes silent.** Missing STW, missing heel and stale heel all mean the plugin simply stops publishing, and source priorities fall back to the raw sensor — which is what the priority system is for. The plugin never republishes a value it has not improved. The status line in the admin UI reports which state it is in.
+**When it cannot correct, it goes silent.** Missing STW, missing heel and stale heel all mean the plugin simply stops publishing. The plugin never republishes a value it has not improved. The status line in the admin UI reports which state it is in.
+
+On the standard path that is the whole point — source priorities fall back to the raw sensor, so STW keeps flowing. **On the corrected-path-only setting there is nothing to fall back to**, so `navigation.speedThroughWaterCorrected` simply stops updating and goes stale. Anything consuming it needs to handle that itself.
 
 The one exception is the minimum-speed threshold: below it the plugin still publishes `corrected = raw`. Going silent there would make the plugin drop in and out every time boat speed crossed the threshold, costing a priority fallback timeout on each transition, and the value is identical either way.
 
@@ -94,4 +111,4 @@ The one exception is the minimum-speed threshold: below it the plugin still publ
 
 - **Subscribe-and-republish, not `registerDeltaInputHandler`.** An input handler is for modifying a delta in place as it passes through, not for republishing a value under your own source. A correction plugin emits under its own `$source` and lets source priority choose between that and the raw source. (This plugin used an input handler until the source-priority rework made the subscribe path viable.)
 
-- **Loop guard.** Deltas published with no explicit `source` object get `$source` set to `plugin.id` by the server, and the plugin skips those. As a backstop it also remembers recently published values that differed from their input, and refuses to re-correct one that comes back under an unexpected `$source` — logging the offending source once, since an unbroken loop on the primary STW path is the failure mode that matters most here. If you ever feed an external NMEA source carrying this plugin's corrected value back into Signal K as `navigation.speedThroughWater`, that backstop is what catches it.
+- **Loop guard** (only relevant when publishing to the standard path). Deltas published with no explicit `source` object get `$source` set to `plugin.id` by the server, and the plugin skips those. As a backstop it also remembers recently published values that differed from their input, and refuses to re-correct one that comes back under an unexpected `$source` — logging the offending source once, since an unbroken loop on the primary STW path is the failure mode that matters most here. If you ever feed an external NMEA source carrying this plugin's corrected value back into Signal K as `navigation.speedThroughWater`, that backstop is what catches it.
