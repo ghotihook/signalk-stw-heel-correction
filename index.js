@@ -23,8 +23,9 @@ const DEFAULT_TABLE = `heel\\bsp,0.5,1.0,1.5,2.0,2.5,3.0,3.5,4.0,4.5,5.0,5.5,6.0
 
 const MS_TO_KN = 1.94384
 const RAD_TO_DEG = 180 / Math.PI
-const OUTPUT_PATH = 'navigation.speedThroughWaterCorrected'
+const STW_PATH = 'navigation.speedThroughWater'
 const DEFAULT_MIN_SPEED_KN = 1.0
+const ATTITUDE_MAX_AGE_MS = 1000
 
 function parseLabeledCsv(s) {
   const rows = s.trim().split(/\r?\n/).map(r => r.split(',').map(c => c.trim()))
@@ -74,15 +75,26 @@ module.exports = function (app) {
   const plugin = {
     id: 'signalk-stw-heel-correction',
     name: 'gh - STW Heel Correction',
-    description: `Corrects navigation.speedThroughWater for heel angle, publishes ${OUTPUT_PATH} and outputs the corrected value as an NMEA0183 VHW sentence over UDP`
+    description: `Corrects ${STW_PATH} for heel angle and republishes it under this plugin's own source, so Signal K source priorities can rank it above the raw paddlewheel`
   }
 
-  let unregisterHandler = null
+  let unsubscribes = []
   let udpSocket = null
+  let retryTimer = null
 
   plugin.schema = {
     type: 'object',
     properties: {
+      minSpeedKn: {
+        type: 'number',
+        title: 'Minimum speed (knots) to apply the correction — below this the raw STW is passed through uncorrected',
+        default: DEFAULT_MIN_SPEED_KN
+      },
+      udpEnabled: {
+        type: 'boolean',
+        title: 'Also broadcast the corrected value as an NMEA0183 VHW sentence over UDP (only needed for consumers that are not reading from Signal K)',
+        default: true
+      },
       udpHost: {
         type: 'string',
         title: 'UDP destination host',
@@ -92,11 +104,6 @@ module.exports = function (app) {
         type: 'number',
         title: 'UDP destination port',
         default: 1183
-      },
-      minSpeedKn: {
-        type: 'number',
-        title: 'Minimum speed (knots) to apply the correction — below this the raw STW is passed through uncorrected',
-        default: DEFAULT_MIN_SPEED_KN
       },
       correctionTable: {
         type: 'string',
@@ -114,7 +121,7 @@ module.exports = function (app) {
   }
 
   plugin.start = function (options) {
-    if (unregisterHandler) { unregisterHandler(); unregisterHandler = null }
+    stopEverything()
 
     const parsed = parseLabeledCsv(options.correctionTable || DEFAULT_TABLE)
     const { bspBins, heelBins, table: correctionTable } = parsed
@@ -124,78 +131,173 @@ module.exports = function (app) {
       return
     }
 
+    const udpEnabled = options.udpEnabled !== false
     const udpHost    = options.udpHost    || '255.255.255.255'
     const udpPort    = options.udpPort    || 1183
     const minSpeedKn = Number.isFinite(options.minSpeedKn) ? options.minSpeedKn : DEFAULT_MIN_SPEED_KN
 
     let udpReady = false
-    udpSocket = dgram.createSocket('udp4')
-    udpSocket.on('error', (err) => {
-      app.error(`UDP socket error: ${err.message}`)
-    })
-    udpSocket.bind(() => {
-      udpSocket.setBroadcast(true)
-      udpReady = true
-    })
+    if (udpEnabled) {
+      udpSocket = dgram.createSocket('udp4')
+      udpSocket.on('error', (err) => app.error(`UDP socket error: ${err.message}`))
+      udpSocket.bind(() => {
+        udpSocket.setBroadcast(true)
+        udpReady = true
+      })
+    }
 
-    app.debug(`started: ${heelBins.length}×${bspBins.length} table, min speed ${minSpeedKn} kn, publishing ${OUTPUT_PATH}, sending VHW to ${udpHost}:${udpPort}`)
-    app.setPluginStatus(`Active — publishing ${OUTPUT_PATH}, sending VHW to ${udpHost}:${udpPort}`)
+    // Loop guard. The server sets $source to plugin.id on deltas we publish with no
+    // explicit source object, so an exact match is the documented check — but this
+    // plugin has previously been bitten by a $source that did not match exactly, and
+    // an unbroken loop now lands on the boat's primary STW path. Tolerate a suffix.
+    function isOwnSource(src) {
+      if (!src) return false
+      const s = String(src)
+      return s === plugin.id || s.startsWith(plugin.id + '.')
+    }
 
-    unregisterHandler = app.registerDeltaInputHandler((delta, next) => {
+    // Backstop echo detector: remember values we published that differ from their
+    // input, so a re-delivered output is recognisable even if its $source is not.
+    // Only non-pass-through values are recorded, so a genuine sample can never match.
+    const recentOutputs = []
+    let loopWarned = false
+    function noteOutput(ms) {
+      recentOutputs.push(ms)
+      if (recentOutputs.length > 32) recentOutputs.shift()
+    }
+    function isOwnEcho(ms) {
+      return recentOutputs.some(o => Math.abs(o - ms) < 1e-12)
+    }
+
+    let lastState = null
+    function reportState(state, detail) {
+      if (state === lastState) return
+      lastState = state
+      app.setPluginStatus(detail)
+    }
+
+    function onDelta(delta) {
       for (const update of (delta.updates || [])) {
+        if (isOwnSource(update.$source)) continue
+
         for (const v of (update.values || [])) {
-          if (v.path !== 'navigation.speedThroughWater') continue
+          if (v.path !== STW_PATH) continue
           if (v.value == null || !Number.isFinite(v.value)) continue
 
-          const attitudeData = app.getSelfPath('navigation.attitude')
-          const roll = (attitudeData && attitudeData.value != null) ? attitudeData.value.roll : null
-          if (roll == null || !Number.isFinite(roll)) {
-            app.debug('skipping correction: no valid roll/heel data available')
-            continue
-          }
-
-          const attitudeAge = attitudeData.timestamp ? (Date.now() - new Date(attitudeData.timestamp).getTime()) : Infinity
-          if (!(attitudeAge < 1000)) {
-            app.debug(`skipping correction: attitude data stale (${attitudeAge} ms old)`)
+          if (isOwnEcho(v.value)) {
+            if (!loopWarned) {
+              loopWarned = true
+              app.error(
+                `Loop guard mismatch: received a value this plugin published, but its ` +
+                `$source was "${update.$source}" rather than "${plugin.id}". Skipping it ` +
+                `to avoid a feedback loop — please report this $source value.`
+              )
+            }
             continue
           }
 
           const stwKn = v.value * MS_TO_KN
-          const heelDeg = roll * RAD_TO_DEG
-          const belowMinSpeed = stwKn < minSpeedKn
-          const correctionKn = belowMinSpeed ? 0 : bilinear(correctionTable, heelBins, bspBins, heelDeg, stwKn)
-          const correctedKn = Math.max(0, stwKn + correctionKn)
 
-          if (belowMinSpeed) {
-            app.debug(`STW ${stwKn.toFixed(2)} kn below minimum ${minSpeedKn} kn → passing through uncorrected`)
-          } else {
-            app.debug(`STW ${stwKn.toFixed(2)} kn, heel ${heelDeg.toFixed(1)}° → correction ${correctionKn.toFixed(4)} kn → corrected ${correctedKn.toFixed(2)} kn`)
+          const attitudeData = app.getSelfPath('navigation.attitude')
+          const roll = (attitudeData && attitudeData.value != null) ? attitudeData.value.roll : null
+          const attitudeAge = (attitudeData && attitudeData.timestamp)
+            ? (Date.now() - new Date(attitudeData.timestamp).getTime())
+            : Infinity
+
+          // Without usable heel there is no correction to make, so go silent and let
+          // source priorities fall back to the raw sensor rather than republishing a
+          // value we have not improved.
+          if (roll == null || !Number.isFinite(roll)) {
+            reportState('noroll', 'Silent — no valid heel data, falling back to raw source')
+            app.debug('no valid roll/heel data — going silent')
+            continue
+          }
+          if (!(attitudeAge < ATTITUDE_MAX_AGE_MS)) {
+            reportState('stale', 'Silent — heel data stale, falling back to raw source')
+            app.debug(`attitude stale (${attitudeAge} ms) — going silent`)
+            continue
           }
 
+          let correctionKn = 0
+          if (stwKn < minSpeedKn) {
+            reportState('slow', `Passing STW through — below ${minSpeedKn} kn`)
+            app.debug(`STW ${stwKn.toFixed(2)} kn below minimum ${minSpeedKn} kn — passing through uncorrected`)
+          } else {
+            correctionKn = bilinear(correctionTable, heelBins, bspBins, roll * RAD_TO_DEG, stwKn)
+            reportState('correcting', `Correcting ${STW_PATH} — rank this plugin above the sensor in Source Priorities`)
+            app.debug(`STW ${stwKn.toFixed(2)} kn, heel ${(roll * RAD_TO_DEG).toFixed(1)}° → correction ${correctionKn.toFixed(4)} kn → corrected ${Math.max(0, stwKn + correctionKn).toFixed(2)} kn`)
+          }
+
+          const correctedKn = Math.max(0, stwKn + correctionKn)
+          const correctedMs = correctedKn / MS_TO_KN
+
+          if (correctedMs !== v.value) noteOutput(correctedMs)
+
+          // No source object: the server stamps $source with plugin.id, which is what
+          // both the loop guard above and the user's Source Priorities entry match on.
           app.handleMessage(plugin.id, {
             updates: [{
               timestamp: update.timestamp,
-              values: [{ path: OUTPUT_PATH, value: correctedKn / MS_TO_KN }]
+              values: [{ path: STW_PATH, value: correctedMs }]
             }]
           })
 
-          if (udpReady) {
-            const sentence = buildVHW(correctedKn)
-            const buf = Buffer.from(sentence)
+          if (udpEnabled && udpReady) {
+            const buf = Buffer.from(buildVHW(correctedKn))
             udpSocket.send(buf, 0, buf.length, udpPort, udpHost)
           }
         }
       }
-      next(delta)
-    })
+    }
+
+    // sourcePolicy 'all' delivers every source at full rate with no priority cascade
+    // on the input feed. excludeSelf is wrong here: its cascade stalls a full-rate
+    // corrector once this plugin outranks the sensor, waiting on its own excluded
+    // output until the fallback timeout.
+    const subscription = {
+      context: 'vessels.self',
+      sourcePolicy: 'all',
+      subscribe: [{ path: STW_PATH }]
+    }
+
+    // subscriptionmanager has not always been ready at plugin.start; retry briefly
+    // rather than silently never subscribing.
+    function trySubscribe(attempt) {
+      retryTimer = null
+      const sm = app.subscriptionmanager
+      if (sm && typeof sm.subscribe === 'function') {
+        try {
+          sm.subscribe(subscription, unsubscribes, (err) => app.setPluginError(String(err)), onDelta)
+          app.debug(`subscribed to ${STW_PATH} (sourcePolicy: all)`)
+          return
+        } catch (e) {
+          app.error(`subscribe failed: ${e.message}`)
+        }
+      }
+      if (attempt >= 20) {
+        app.setPluginError('Could not subscribe — subscriptionmanager unavailable')
+        return
+      }
+      retryTimer = setTimeout(() => trySubscribe(attempt + 1), 500)
+    }
+
+    app.debug(`started: ${heelBins.length}×${bspBins.length} table, min speed ${minSpeedKn} kn, republishing ${STW_PATH} as "${plugin.id}"${udpEnabled ? `, sending VHW to ${udpHost}:${udpPort}` : ', UDP output disabled'}`)
+    app.setPluginStatus(`Starting — republishing ${STW_PATH} as "${plugin.id}"`)
+    trySubscribe(0)
   }
 
-  plugin.stop = function () {
-    if (unregisterHandler) { unregisterHandler(); unregisterHandler = null }
+  function stopEverything() {
+    if (retryTimer) { clearTimeout(retryTimer); retryTimer = null }
+    unsubscribes.forEach(f => f())
+    unsubscribes = []
     if (udpSocket) {
       udpSocket.close()
       udpSocket = null
     }
+  }
+
+  plugin.stop = function () {
+    stopEverything()
     app.debug('stopped')
     app.setPluginStatus('Stopped')
   }
