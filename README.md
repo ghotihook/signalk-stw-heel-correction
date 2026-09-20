@@ -64,6 +64,21 @@ STW 6.00 kn, heel -10.3° → correction 0.2050 kn → corrected 6.21 kn
 
 ---
 
+## Reading the status line
+
+The plugin's status in the admin UI says what it is doing right now, refreshed about once a second:
+
+| Status | Meaning |
+|---|---|
+| `Waiting for navigation.speedThroughWater` | Subscribed, but no STW has arrived yet. If this stays up, the sensor is not producing. |
+| `Correcting — heel 22°, -0.29 kn → 7.11 kn` | Working normally, showing the live heel, the correction being applied and the result |
+| `Not correcting — 0.6 kn is below the 1 kn minimum, publishing raw` | Too slow to correct; the raw value is still being published |
+| `Not publishing — no heel data, raw source in use` | No usable heel, so the plugin has gone quiet and priorities have fallen back |
+| `Not publishing — heel data stale, raw source in use` | Heel data older than 1 s, same behaviour |
+| `Correction table: …` (error) | The table could not be parsed; the message names the offending cell |
+
+---
+
 ## Configuration
 
 The plugin ships with a default correction table for Sakura (Swan 36, AUS 373).
