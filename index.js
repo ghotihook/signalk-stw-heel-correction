@@ -25,6 +25,7 @@ const STW_PATH = 'navigation.speedThroughWater'
 const CORRECTED_PATH = 'navigation.speedThroughWaterCorrected'
 const DEFAULT_MIN_SPEED_KN = 1.0
 const ATTITUDE_MAX_AGE_MS = 1000
+const STATUS_INTERVAL_MS = 1000
 
 // A blank cell means "no data for this heel/speed combination" — typically a corner
 // of the grid the boat never occupies. Extend the nearest known value into it rather
@@ -236,17 +237,21 @@ module.exports = function (app) {
       return recentOutputs.some(o => Math.abs(o - ms) < 1e-12)
     }
 
-    const silentSuffix = writesStandardPath
-      ? ', falling back to raw source'
-      : `, ${CORRECTED_PATH} will go stale`
-    const correctingStatus = writesStandardPath
-      ? `Correcting → ${outputPaths.join(' + ')} — rank this plugin above the sensor in Source Priorities`
-      : `Correcting → ${CORRECTED_PATH}`
+    // What happens to consumers while the plugin is not publishing depends on
+    // whether anything else is serving the path.
+    const fallback = writesStandardPath
+      ? 'raw source in use'
+      : `${CORRECTED_PATH} going stale`
 
+    // Refresh on a state change, and once a second within a state so the live
+    // numbers in the correcting status keep moving.
     let lastState = null
+    let lastStatusAt = 0
     function reportState(state, detail) {
-      if (state === lastState) return
+      const now = Date.now()
+      if (state === lastState && now - lastStatusAt < STATUS_INTERVAL_MS) return
       lastState = state
+      lastStatusAt = now
       app.setPluginStatus(detail)
     }
 
@@ -282,24 +287,26 @@ module.exports = function (app) {
           // source priorities fall back to the raw sensor rather than republishing a
           // value we have not improved.
           if (roll == null || !Number.isFinite(roll)) {
-            reportState('noroll', `Silent — no valid heel data${silentSuffix}`)
+            reportState('noroll', `Not publishing — no heel data, ${fallback}`)
             app.debug('no valid roll/heel data — going silent')
             continue
           }
           if (!(attitudeAge < ATTITUDE_MAX_AGE_MS)) {
-            reportState('stale', `Silent — heel data stale${silentSuffix}`)
+            reportState('stale', `Not publishing — heel data stale, ${fallback}`)
             app.debug(`attitude stale (${attitudeAge} ms) — going silent`)
             continue
           }
 
+          const heelDeg = roll * RAD_TO_DEG
           let correctionKn = 0
           if (stwKn < minSpeedKn) {
-            reportState('slow', `Passing STW through — below ${minSpeedKn} kn`)
+            reportState('slow', `Not correcting — ${stwKn.toFixed(1)} kn is below the ${minSpeedKn} kn minimum, publishing raw`)
             app.debug(`STW ${stwKn.toFixed(2)} kn below minimum ${minSpeedKn} kn — passing through uncorrected`)
           } else {
-            correctionKn = bilinear(correctionTable, heelBins, bspBins, roll * RAD_TO_DEG, stwKn)
-            reportState('correcting', correctingStatus)
-            app.debug(`STW ${stwKn.toFixed(2)} kn, heel ${(roll * RAD_TO_DEG).toFixed(1)}° → correction ${correctionKn.toFixed(4)} kn → corrected ${Math.max(0, stwKn + correctionKn).toFixed(2)} kn`)
+            correctionKn = bilinear(correctionTable, heelBins, bspBins, heelDeg, stwKn)
+            const signed = `${correctionKn >= 0 ? '+' : ''}${correctionKn.toFixed(2)}`
+            reportState('correcting', `Correcting — heel ${heelDeg.toFixed(0)}°, ${signed} kn → ${Math.max(0, stwKn + correctionKn).toFixed(2)} kn`)
+            app.debug(`STW ${stwKn.toFixed(2)} kn, heel ${heelDeg.toFixed(1)}° → correction ${correctionKn.toFixed(4)} kn → corrected ${Math.max(0, stwKn + correctionKn).toFixed(2)} kn`)
           }
 
           const correctedKn = Math.max(0, stwKn + correctionKn)
@@ -318,6 +325,12 @@ module.exports = function (app) {
         }
       }
     }
+
+    // The one place the priority hint is actionable: nothing is arriving yet, so the
+    // user is most likely still setting the plugin up.
+    const waitingStatus = writesStandardPath
+      ? `Waiting for ${STW_PATH} — rank "${plugin.id}" above the sensor in Source Priorities`
+      : `Waiting for ${STW_PATH}`
 
     // sourcePolicy 'all' delivers every source at full rate with no priority cascade
     // on the input feed. excludeSelf is wrong here: its cascade stalls a full-rate
@@ -338,6 +351,9 @@ module.exports = function (app) {
         try {
           sm.subscribe(subscription, unsubscribes, (err) => app.setPluginError(String(err)), onDelta)
           app.debug(`subscribed to ${STW_PATH} (sourcePolicy: all)`)
+          // Nothing more happens until a delta arrives, so say so rather than
+          // leaving a "starting" status up indefinitely when STW is not flowing.
+          app.setPluginStatus(waitingStatus)
           return
         } catch (e) {
           app.error(`subscribe failed: ${e.message}`)
@@ -351,7 +367,7 @@ module.exports = function (app) {
     }
 
     app.debug(`started: ${heelBins.length}×${bspBins.length} table, min speed ${minSpeedKn} kn, publishing ${outputPaths.join(' + ')} as "${plugin.id}"`)
-    app.setPluginStatus(`Starting — publishing ${outputPaths.join(' + ')} as "${plugin.id}"`)
+    app.setPluginStatus(`Starting — output ${outputPaths.join(' + ')}`)
     trySubscribe(0)
   }
 

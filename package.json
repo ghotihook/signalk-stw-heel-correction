@@ -1,13 +1,40 @@
 {
   "name": "signalk-stw-heel-correction",
-  "version": "0.1.0",
-  "description": "Corrects speed through water for heel angle using a 2D bilinear interpolation table",
+  "version": "0.2.0",
+  "description": "Signal K plugin that corrects speed through water for heel angle from a 2D interpolation table, republishing it under its own source so source priorities can rank it above the raw paddlewheel",
   "main": "index.js",
   "keywords": [
-    "signalk-node-server-plugin"
+    "signalk-node-server-plugin",
+    "signalk-category-utility",
+    "signalk",
+    "sailing",
+    "racing",
+    "speed-through-water",
+    "heel",
+    "paddlewheel",
+    "calibration"
   ],
-  "license": "Apache-2.0",
+  "signalk-plugin-enabled-by-default": false,
+  "signalk": {
+    "displayName": "STW Heel Correction",
+    "appIcon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "icon.svg",
+    "public/"
+  ],
   "engines": {
-    "node": ">=12"
-  }
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ghotihook/signalk-stw-heel-correction.git"
+  },
+  "homepage": "https://github.com/ghotihook/signalk-stw-heel-correction#readme",
+  "bugs": {
+    "url": "https://github.com/ghotihook/signalk-stw-heel-correction/issues"
+  },
+  "author": "ghotihook",
+  "license": "Apache-2.0"
 }

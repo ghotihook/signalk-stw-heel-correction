@@ -1,3 +1,5 @@
+<img src="public/icon.svg" width="72" align="right" alt="">
+
 # signalk-stw-heel-correction
 
 Signal K plugin that corrects speed through water for heel angle using a 2D bilinear interpolation table.
