@@ -12,16 +12,30 @@ Alternatively it can publish to a separate `navigation.speedThroughWaterCorrecte
 
 ---
 
-## Installation (server — once)
+## Requirements
+
+- **Node 18 or newer**
+- **A Signal K 2.x server with Source Priorities**, for the default output setting. The plugin reads its input with `sourcePolicy: 'all'` and relies on priorities to rank its output above the raw sensor, which depends on the server's recent source-priority rework. The corrected-path output setting does not.
+- Source priorities were writable without authentication before server **2.24.0-beta.1** ([CVE-2026-33951](https://advisories.gitlab.com/npm/signalk-server/CVE-2026-33951/)). Since this plugin makes displayed boat speed depend on that setting, upgrade past it before relying on the default output.
+- An attitude source publishing `navigation.attitude` roll, in radians, at least once a second.
+
+---
+
+## Installation (server)
 
 ```bash
-git clone git@github.com:ghotihook/signalk-stw-heel-correction ~/signalk-stw-heel-correction
 cd ~/.signalk
-npm install ~/signalk-stw-heel-correction
+npm install git+https://github.com/ghotihook/signalk-stw-heel-correction.git
 sudo systemctl restart signalk
 ```
 
-Then enable the plugin in the Signal K plugin config UI.
+Then enable the plugin in the Signal K plugin config UI — it ships disabled.
+
+To move to a specific commit later, npm will not re-fetch a git dependency whose version has not changed, so pin the ref:
+
+```bash
+npm install git+https://github.com/ghotihook/signalk-stw-heel-correction.git#<commit>
+```
 
 ### Output path
 
@@ -47,19 +61,23 @@ Priorities also cover the plugin going quiet — if it is disabled, the server r
 
 ## Development workflow
 
-Edit locally, push to GitHub, pull on the server:
+For working on the plugin rather than just running it, clone it and install from the working copy so a `git pull` is all the server needs:
 
 ```bash
+# Server — once
+git clone https://github.com/ghotihook/signalk-stw-heel-correction ~/signalk-stw-heel-correction
+cd ~/.signalk && npm install ~/signalk-stw-heel-correction
+
 # Mac — after making changes
 git add -p && git commit -m "describe change" && git push
 
-# Server
+# Server — to pick them up
 git -C ~/signalk-stw-heel-correction pull && sudo systemctl restart signalk
 ```
 
 Enable debug logging for the plugin in the Signal K admin UI to see per-update log lines:
 ```
-STW 6.00 kn, heel -10.3° → correction 0.2050 kn → corrected 6.21 kn
+STW 6.00 kn, heel -10.3° → correction -0.0154 kn → corrected 5.98 kn
 ```
 
 ---
@@ -129,7 +147,7 @@ heel\adj_stw,  0.5,  1.0,  1.5,   2.0
            0,0.564,0.599, 0.495, 0.373
 ```
 
-A blank is **not** read as a zero correction. The nearest known value is extended into it, first along the speed axis and then, for a heel row that is blank all the way across, from the nearest heel row that has data. Reading blanks as zero would pull a real correction toward nothing as the boat approached the edge of the measured region — at −25° heel and 4.2 kn in the table above, zero-fill gives about −0.055 kn where the measured edge value is −0.138 kn. Holding the edge value is the same behaviour inputs outside the bin range already get.
+A blank is **not** read as a zero correction. The nearest known value is extended into it, first along the speed axis and then, for a heel row that is blank all the way across, from the nearest heel row that has data. Reading blanks as zero would pull a real correction toward nothing as the boat approached the edge of the measured region — in the shipped table, at −25° heel and 4.2 kn, zero-fill gives about −0.055 kn where the measured edge value is −0.138 kn. Holding the edge value is the same behaviour inputs outside the bin range already get.
 
 If you do want a genuine zero at some point, write `0` rather than leaving the cell empty.
 
@@ -142,8 +160,8 @@ A table that cannot be parsed — a ragged row, a non-numeric entry, no numbers 
 The plugin subscribes to `navigation.speedThroughWater` via `app.subscriptionmanager.subscribe` with **`sourcePolicy: 'all'`**, which delivers every sample from every source at full rate with no priority cascade on the input feed. On each value:
 
 1. The value is skipped if it came from this plugin's own `$source` (loop guard), or if it is null or non-finite — **nothing is published**
-2. Current `navigation.attitude` roll is read via `getSelfPath`. If the roll is missing or non-finite, or the attitude data is more than 1 s old (stale-sensor guard), the plugin **publishes nothing** for that sample
-3. STW is converted from m/s to knots, roll from radians to degrees
+2. STW is converted from m/s to knots and checked for plausibility (see **Bad sensor data**); an implausible reading is dropped
+3. Current `navigation.attitude` roll is read via `getSelfPath` and converted from radians to degrees. If it is missing, non-finite, implausible, more than 1 s old, or dated in the future, the plugin **publishes nothing** for that sample
 4. If STW is below the configured minimum speed the correction is forced to zero (`corrected = raw`); otherwise it is bilinearly interpolated from the table at (heel °, BSP kn), with inputs outside the bin range clamped to the nearest edge
 5. `corrected = max(0, raw + correction)` — the result is floored at zero
 6. The corrected value is published to the configured output path(s) via `app.handleMessage(plugin.id, ...)`, carrying the source delta's timestamp
@@ -172,3 +190,9 @@ The one exception is the minimum-speed threshold: below it the plugin still publ
 - **Subscribe-and-republish, not `registerDeltaInputHandler`.** An input handler is for modifying a delta in place as it passes through, not for republishing a value under your own source. A correction plugin emits under its own `$source` and lets source priority choose between that and the raw source. (This plugin used an input handler until the source-priority rework made the subscribe path viable.)
 
 - **Loop guard** (only relevant when publishing to the standard path). Deltas published with no explicit `source` object get `$source` set to `plugin.id` by the server, and the plugin skips those. As a backstop it also remembers recently published values that differed from their input, and refuses to re-correct one that comes back under an unexpected `$source` — logging the offending source once, since an unbroken loop on the primary STW path is the failure mode that matters most here. If you ever feed an external NMEA source carrying this plugin's corrected value back into Signal K as `navigation.speedThroughWater`, that backstop is what catches it.
+
+---
+
+## Licence
+
+Apache-2.0. See [LICENSE](LICENSE).
