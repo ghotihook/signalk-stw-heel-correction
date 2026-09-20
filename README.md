@@ -112,7 +112,7 @@ The plugin's status in the admin UI says what it is doing right now, refreshed a
 
 ## Configuration
 
-The plugin ships with a default correction table as a worked example. The correction is specific to your hull and to how the paddlewheel is mounted, so measure your own rather than sailing on the default.
+The plugin ships with a default correction table measured on a 36 ft racer/cruiser, included as a worked example of the format. The correction is specific to a hull and to how the paddlewheel is mounted, so measure your own rather than sailing on the default.
 
 | Setting | Default | Description |
 |---|---|---|
@@ -120,25 +120,40 @@ The plugin ships with a default correction table as a worked example. The correc
 | **Minimum speed (knots)** | `1.0` | Below this raw STW, no correction is applied — `corrected = raw`. Still published, so the plugin does not flap in and out around the threshold. |
 | **Correction table** | (built-in example) | Labeled CSV, see below |
 
-**Correction table** — a labeled CSV pasted into the plugin config UI:
+---
 
-- Row 1: `heel\bsp,0.5,1.0,1.5,...` — BSP bin edges in knots
-- Rows 2+: `<heel angle>,<correction>,<correction>,...` — one row per heel angle in degrees (negative = port heel), one correction value per BSP bin in knots
+## Correction table format
+
+A grid of corrections, pasted into the plugin config UI as CSV. The first row gives the boat-speed columns, the first column gives the heel rows, and each cell is the correction for that combination.
 
 ```
-heel\bsp,0.5,1.0,2.0,3.0
--10,0.12,0.12,0.20,0.20
-0,0.55,0.54,0.44,0.28
-10,0.14,0.14,0.22,0.16
+heel\bsp,0.5,1.0,2.0,3.0    <- label, then boat speeds in knots
+    -10,0.12,0.12,0.20,0.20    <- heel in degrees, then one correction per speed
+      0,0.55,0.54,0.44,0.28
+     10,0.14,0.14,0.22,0.16
 ```
 
-Correction values are additive: `corrected = raw + correction`. Inputs outside the bin range are clamped to the nearest edge. Values between bins are bilinearly interpolated.
+| Part | Means |
+|---|---|
+| **First cell** | A label. Write anything — `heel\bsp`, `heel\adj_stw`, `deg\kn`. It is ignored. |
+| **First row** | Boat speed in **knots**, one per column |
+| **First column** | Heel in **degrees**. Negative is port, positive is starboard |
+| **Every other cell** | The correction in **knots**, added to the raw speed |
 
-The header's first cell is a label you can write however you like (`heel\bsp`, `heel\adj_stw`, …). Rows may run in either direction — smallest heel first or largest first — and so may the BSP bins; a table written the other way up is reversed on load rather than rejected. Bins must not repeat, since that would make interpolation ambiguous.
+### The rules
 
-Tables usually arrive pasted out of a spreadsheet, so the usual transport damage is handled: tab or semicolon separators, CRLF line endings, a UTF-8 byte order mark, quoted cells, alignment padding, blank lines, a trailing separator on every line, a typographic minus sign (`−`) and degree marks on the heel column.
+- **Corrections are additive and signed:** `corrected = raw + correction`. A **positive** value means the paddlewheel *under-reads* at that heel and speed, so the correction adds speed back. A negative value means it over-reads.
+- **The speed column is chosen from the raw sensor speed**, not from the corrected result — the lookup is done before the correction is applied.
+- **Heel is not mirrored.** A table covering only starboard heel does *not* reflect onto port; every negative heel would clamp to the lowest row you gave. Write both halves out, even if they are symmetric.
+- **Between grid points the value is interpolated** bilinearly across both axes, so the table can be coarse.
+- **Outside the grid the nearest edge is held.** The table does not have to cover every condition, but a too-narrow table applies its edge value flat across everything beyond it.
+- **Rows and columns may run in either direction** — smallest first or largest first, independently. A table written the other way up is reversed on load, not rejected.
+- **Bins must not repeat.** A duplicated heel angle or speed makes interpolation ambiguous and is rejected.
+- **Any grid size works**, down to a single row and column, and the spacing does not have to be even.
 
-**Blank cells mean "no data here"** — typically a corner of the grid the boat never occupies, like 35° of heel at half a knot:
+### Blank cells
+
+**A blank means "no data here"** — typically a corner of the grid the boat never occupies, like 35° of heel at half a knot:
 
 ```
 heel\adj_stw,  0.5,  1.0,  1.5,   2.0
@@ -147,9 +162,15 @@ heel\adj_stw,  0.5,  1.0,  1.5,   2.0
            0,0.564,0.599, 0.495, 0.373
 ```
 
-A blank is **not** read as a zero correction. The nearest known value is extended into it, first along the speed axis and then, for a heel row that is blank all the way across, from the nearest heel row that has data. Reading blanks as zero would pull a real correction toward nothing as the boat approached the edge of the measured region — in the shipped table, at −25° heel and 4.2 kn, zero-fill gives about −0.055 kn where the measured edge value is −0.138 kn. Holding the edge value is the same behaviour inputs outside the bin range already get.
+A blank is **not** read as a zero correction. The nearest known value is extended into it, first along the speed axis and then, for a heel row that is blank all the way across, from the nearest heel row that has data.
 
-If you do want a genuine zero at some point, write `0` rather than leaving the cell empty.
+Reading blanks as zero would pull a real correction toward nothing as the boat approached the edge of the measured region — in the shipped table, at −25° heel and 4.2 kn, zero-fill gives about −0.055 kn where the measured edge value is −0.138 kn. Holding the edge value is the same behaviour inputs outside the bin range already get.
+
+If you want a genuine zero somewhere, write `0` rather than leaving the cell empty.
+
+### Pasting from a spreadsheet
+
+Copy a range straight out of a spreadsheet and paste it in — the usual transport damage is handled: tab or semicolon separators, CRLF line endings, a UTF-8 byte order mark, quoted cells, alignment padding, blank lines, a trailing separator on every line, a typographic minus sign (`−`) and degree marks on the heel column.
 
 A table that cannot be parsed — a ragged row, a non-numeric entry, no numbers at all — puts the reason in the plugin's error status rather than failing silently.
 
