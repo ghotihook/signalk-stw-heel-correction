@@ -26,16 +26,90 @@ const CORRECTED_PATH = 'navigation.speedThroughWaterCorrected'
 const DEFAULT_MIN_SPEED_KN = 1.0
 const ATTITUDE_MAX_AGE_MS = 1000
 
+// A blank cell means "no data for this heel/speed combination" — typically a corner
+// of the grid the boat never occupies. Extend the nearest known value into it rather
+// than reading it as a zero correction: a zero would pull a real correction toward
+// nothing as the boat approached the edge of the measured region, which is the same
+// edge-holding behaviour inputs outside the bin range already get.
+function fillGaps(table) {
+  const cols = table[0].length
+
+  for (const row of table) {
+    let last = null
+    for (let j = 0; j < cols; j++) {
+      if (row[j] !== null) last = row[j]
+      else if (last !== null) row[j] = last
+    }
+    last = null
+    for (let j = cols - 1; j >= 0; j--) {
+      if (row[j] !== null) last = row[j]
+      else if (last !== null) row[j] = last
+    }
+  }
+
+  // A row filled above is filled completely, so an empty first cell means the whole
+  // heel row was blank. Take it from the nearest heel row that has data.
+  for (let i = 0; i < table.length; i++) {
+    if (table[i][0] !== null) continue
+    let src = null
+    for (let d = 1; d < table.length && src === null; d++) {
+      if (i - d >= 0 && table[i - d][0] !== null) src = table[i - d]
+      else if (i + d < table.length && table[i + d][0] !== null) src = table[i + d]
+    }
+    if (src) table[i] = src.slice()
+  }
+
+  if (table.some(r => r.some(c => c === null))) {
+    throw new Error('no numeric correction values found anywhere in the table')
+  }
+  return table
+}
+
 function parseLabeledCsv(s) {
-  const rows = s.trim().split(/\r?\n/).map(r => r.split(',').map(c => c.trim()))
-  const bspBins = rows[0].slice(1).map(Number)
+  const rows = s.trim().split(/\r?\n/)
+    .map(r => r.split(',').map(c => c.trim()))
+    .filter(r => r.some(c => c !== ''))
+
+  if (rows.length < 2) {
+    throw new Error('expected a header row of BSP bins and at least one heel row')
+  }
+
+  const bspBins = rows[0].slice(1).map((c, j) => {
+    const n = Number(c)
+    if (c === '' || !Number.isFinite(n)) {
+      throw new Error(`BSP bin ${j + 1} in the header row is not a number: "${c}"`)
+    }
+    return n
+  })
+
+  if (bspBins.length === 0) throw new Error('header row lists no BSP bins')
+
   const heelBins = []
   const table = []
   for (let i = 1; i < rows.length; i++) {
-    heelBins.push(Number(rows[i][0]))
-    table.push(rows[i].slice(1).map(Number))
+    const cells = rows[i]
+    const heel = Number(cells[0])
+    if (cells[0] === '' || !Number.isFinite(heel)) {
+      throw new Error(`heel angle in row ${i + 1} is not a number: "${cells[0]}"`)
+    }
+    const values = cells.slice(1)
+    if (values.length !== bspBins.length) {
+      throw new Error(
+        `heel row ${heel} has ${values.length} correction values but the header lists ${bspBins.length} BSP bins`
+      )
+    }
+    heelBins.push(heel)
+    table.push(values.map((c, j) => {
+      if (c === '') return null
+      const n = Number(c)
+      if (!Number.isFinite(n)) {
+        throw new Error(`correction at heel ${heel}, BSP ${bspBins[j]} is not a number: "${c}"`)
+      }
+      return n
+    }))
   }
-  return { bspBins, heelBins, table }
+
+  return { bspBins, heelBins, table: fillGaps(table) }
 }
 
 function clampedBracket(bins, v) {
@@ -105,11 +179,14 @@ module.exports = function (app) {
   plugin.start = function (options) {
     stopEverything()
 
-    const parsed = parseLabeledCsv(options.correctionTable || DEFAULT_TABLE)
-    const { bspBins, heelBins, table: correctionTable } = parsed
-
-    if (correctionTable.length !== heelBins.length || correctionTable.some(r => r.length !== bspBins.length)) {
-      app.setPluginError('Correction table dimensions do not match bin counts — check CSV')
+    let bspBins, heelBins, correctionTable
+    try {
+      const parsed = parseLabeledCsv(options.correctionTable || DEFAULT_TABLE)
+      bspBins = parsed.bspBins
+      heelBins = parsed.heelBins
+      correctionTable = parsed.table
+    } catch (e) {
+      app.setPluginError(`Correction table: ${e.message}`)
       return
     }
 

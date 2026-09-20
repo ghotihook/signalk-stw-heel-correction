@@ -86,6 +86,23 @@ heel\bsp,0.5,1.0,2.0,3.0
 
 Correction values are additive: `corrected = raw + correction`. Inputs outside the bin range are clamped to the nearest edge. Values between bins are bilinearly interpolated.
 
+Whitespace padding is ignored, so an aligned table pastes in as-is, and the header's first cell is a label you can write however you like (`heel\bsp`, `heel\adj_stw`, …).
+
+**Blank cells mean "no data here"** — typically a corner of the grid the boat never occupies, like 35° of heel at half a knot:
+
+```
+heel\adj_stw,  0.5,  1.0,  1.5,   2.0
+         -35,     ,     ,     ,-0.282
+         -20,     ,0.007,-0.036,-0.066
+           0,0.564,0.599, 0.495, 0.373
+```
+
+A blank is **not** read as a zero correction. The nearest known value is extended into it, first along the speed axis and then, for a heel row that is blank all the way across, from the nearest heel row that has data. Reading blanks as zero would pull a real correction toward nothing as the boat approached the edge of the measured region — at −25° heel and 4.2 kn in the table above, zero-fill gives about −0.055 kn where the measured edge value is −0.138 kn. Holding the edge value is the same behaviour inputs outside the bin range already get.
+
+If you do want a genuine zero at some point, write `0` rather than leaving the cell empty.
+
+A table that cannot be parsed — a ragged row, a non-numeric entry, no numbers at all — puts the reason in the plugin's error status rather than failing silently.
+
 ---
 
 ## How it works
