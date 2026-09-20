@@ -1,7 +1,5 @@
 'use strict'
 
-const dgram = require('dgram')
-
 // corrected = raw + correction  (positive correction = paddlewheel under-reads at that heel/bsp)
 const DEFAULT_TABLE = `heel\\bsp,0.5,1.0,1.5,2.0,2.5,3.0,3.5,4.0,4.5,5.0,5.5,6.0,6.5,7.0,7.5,8.0,8.5
 -35,0.0000,0.0000,0.0000,0.0000,0.0000,0.0000,0.0000,0.0000,0.0000,0.0000,0.0000,-0.2640,-0.4746,-0.5039,-0.5047,-0.5047,-0.5047
@@ -59,18 +57,6 @@ function bilinear(table, heelBins, bspBins, heel, bsp) {
   )
 }
 
-function nmeaChecksum(body) {
-  let cs = 0
-  for (let i = 0; i < body.length; i++) cs ^= body.charCodeAt(i)
-  return cs.toString(16).toUpperCase().padStart(2, '0')
-}
-
-function buildVHW(speedKn) {
-  const speedKmh = speedKn * 1.852
-  const body = `IIVHW,,T,,M,${speedKn.toFixed(2)},N,${speedKmh.toFixed(2)},K`
-  return `$${body}*${nmeaChecksum(body)}\r\n`
-}
-
 module.exports = function (app) {
   const plugin = {
     id: 'signalk-stw-heel-correction',
@@ -79,7 +65,6 @@ module.exports = function (app) {
   }
 
   let unsubscribes = []
-  let udpSocket = null
   let retryTimer = null
 
   plugin.schema = {
@@ -89,21 +74,6 @@ module.exports = function (app) {
         type: 'number',
         title: 'Minimum speed (knots) to apply the correction — below this the raw STW is passed through uncorrected',
         default: DEFAULT_MIN_SPEED_KN
-      },
-      udpEnabled: {
-        type: 'boolean',
-        title: 'Also broadcast the corrected value as an NMEA0183 VHW sentence over UDP (only needed for consumers that are not reading from Signal K)',
-        default: true
-      },
-      udpHost: {
-        type: 'string',
-        title: 'UDP destination host',
-        default: '255.255.255.255'
-      },
-      udpPort: {
-        type: 'number',
-        title: 'UDP destination port',
-        default: 1183
       },
       correctionTable: {
         type: 'string',
@@ -131,20 +101,7 @@ module.exports = function (app) {
       return
     }
 
-    const udpEnabled = options.udpEnabled !== false
-    const udpHost    = options.udpHost    || '255.255.255.255'
-    const udpPort    = options.udpPort    || 1183
     const minSpeedKn = Number.isFinite(options.minSpeedKn) ? options.minSpeedKn : DEFAULT_MIN_SPEED_KN
-
-    let udpReady = false
-    if (udpEnabled) {
-      udpSocket = dgram.createSocket('udp4')
-      udpSocket.on('error', (err) => app.error(`UDP socket error: ${err.message}`))
-      udpSocket.bind(() => {
-        udpSocket.setBroadcast(true)
-        udpReady = true
-      })
-    }
 
     // Loop guard. The server sets $source to plugin.id on deltas we publish with no
     // explicit source object, so an exact match is the documented check — but this
@@ -241,11 +198,6 @@ module.exports = function (app) {
               values: [{ path: STW_PATH, value: correctedMs }]
             }]
           })
-
-          if (udpEnabled && udpReady) {
-            const buf = Buffer.from(buildVHW(correctedKn))
-            udpSocket.send(buf, 0, buf.length, udpPort, udpHost)
-          }
         }
       }
     }
@@ -281,7 +233,7 @@ module.exports = function (app) {
       retryTimer = setTimeout(() => trySubscribe(attempt + 1), 500)
     }
 
-    app.debug(`started: ${heelBins.length}×${bspBins.length} table, min speed ${minSpeedKn} kn, republishing ${STW_PATH} as "${plugin.id}"${udpEnabled ? `, sending VHW to ${udpHost}:${udpPort}` : ', UDP output disabled'}`)
+    app.debug(`started: ${heelBins.length}×${bspBins.length} table, min speed ${minSpeedKn} kn, republishing ${STW_PATH} as "${plugin.id}"`)
     app.setPluginStatus(`Starting — republishing ${STW_PATH} as "${plugin.id}"`)
     trySubscribe(0)
   }
@@ -290,10 +242,6 @@ module.exports = function (app) {
     if (retryTimer) { clearTimeout(retryTimer); retryTimer = null }
     unsubscribes.forEach(f => f())
     unsubscribes = []
-    if (udpSocket) {
-      udpSocket.close()
-      udpSocket = null
-    }
   }
 
   plugin.stop = function () {
