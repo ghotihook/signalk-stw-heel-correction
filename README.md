@@ -4,11 +4,42 @@
 
 Signal K plugin that corrects speed through water for heel angle using a 2D bilinear interpolation table.
 
-A paddlewheel or impeller tilts with the boat as it heels, causing the raw STW reading to be inaccurate. This plugin watches `navigation.speedThroughWater`, looks up and interpolates a correction from a configurable (heel °, BSP kn) table, and **republishes the corrected value on the same path under its own `$source`**.
+Most paddlewheel logs read differently depending on which way the boat is heeled. This plugin removes that error before anything else on the boat sees it: it watches `navigation.speedThroughWater`, looks up a correction for the current heel angle and boat speed in a table you supply, and **republishes the corrected value on the same path under its own `$source`**.
 
 You then rank this plugin above the raw sensor in the server's **Source Priorities**. Every consumer — displays, logbook, autopilot, anything reading `navigation.speedThroughWater` — gets the corrected value with no reconfiguration, while the raw sensor value stays visible in the data model under its own source for comparison and calibration.
 
 Alternatively it can publish to a separate `navigation.speedThroughWaterCorrected` path, leaving the raw value alone — see **Output path** below.
+
+---
+
+## Why heel correction matters
+
+### The paddlewheel is wrong when the boat heels
+
+A paddlewheel or impeller is almost never on the centreline, and even when it is, it tilts with the hull. As the boat heels:
+
+- On one tack the sensor is pushed deeper; on the other it rises toward the surface, where the flow is disturbed and it can ventilate or come clear of the water altogether on a big heel.
+- The water no longer meets the paddle square on. It flows across the hull at an angle, and through a boundary layer whose thickness varies around the hull.
+- The size of both effects changes with boat speed.
+
+The result is a speed error that depends on heel angle, on which side the boat is heeled to, and on speed. A log calibrated upright on flat water can be accurate motoring and then read noticeably high on one tack and low on the other.
+
+### Why a small STW error causes big problems
+
+Boat speed through the water is not only a number on a display. It is an input to most of the other numbers the instruments calculate:
+
+- **True wind.** True wind speed and angle are worked out from apparent wind and boat speed. A tack-dependent STW error produces a tack-dependent true wind: the true wind direction appears to swing every time you tack, even though the wind has not changed. That makes wind shifts hard to read and laylines unreliable.
+- **Performance and polars.** Target speeds, polar percentage and VMG are compared against STW. If the log reads high on port and low on starboard, the boat looks fast on one tack and slow on the other, and any polar built from logged data inherits the error.
+- **Tide and current.** Set and drift are the difference between speed through the water and speed over the ground. A 0.3 kn STW error appears directly as 0.3 kn of current that does not exist, and the size of that phantom current changes with every tack.
+- **Dead reckoning and leeway**, which rely on the same STW figure.
+
+The problem is at its worst upwind, which is exactly when these numbers are relied on most.
+
+### Why a table, and why do it in Signal K
+
+Many instrument systems either offer no heel correction or offer a single port/starboard factor. That is not enough when the error changes with both heel and speed, which is why this plugin uses a two-dimensional table and interpolates between its entries.
+
+Correcting in Signal K means the correction is applied once, at the source, and everything downstream benefits: displays, the logbook, performance software, true wind calculations and anything else reading `navigation.speedThroughWater`. The raw reading remains available under its own source, so you can compare the two and refine the table over time. If the heel data drops out, the plugin stops publishing and the server falls back to the raw sensor, so you never lose boat speed.
 
 ---
 
@@ -21,21 +52,18 @@ Alternatively it can publish to a separate `navigation.speedThroughWaterCorrecte
 
 ---
 
-## Installation (server)
+## Installation
 
-```bash
-cd ~/.signalk
-npm install git+https://github.com/ghotihook/signalk-stw-heel-correction.git
-sudo systemctl restart signalk
-```
+Install from the Signal K **App Store**:
 
-Then enable the plugin in the Signal K plugin config UI — it ships disabled.
+1. In the Signal K admin UI, open **Appstore → Available**.
+2. Search for **STW Heel Correction** and click **Install**.
+3. Restart the server when prompted.
+4. Open **Server → Plugin Config**, find **STW Heel Correction**, and enable it. It ships disabled.
+5. Choose an output path and set the source priority, both covered below.
+6. Replace the example correction table with one measured on your own boat (see **Configuration**).
 
-To move to a specific commit later, npm will not re-fetch a git dependency whose version has not changed, so pin the ref:
-
-```bash
-npm install git+https://github.com/ghotihook/signalk-stw-heel-correction.git#<commit>
-```
+Updates appear under **Appstore → Updates**.
 
 ### Output path
 
@@ -60,6 +88,16 @@ Priorities also cover the plugin going quiet — if it is disabled, the server r
 ---
 
 ## Development workflow
+
+To run an unreleased version, install straight from GitHub:
+
+```bash
+cd ~/.signalk
+npm install git+https://github.com/ghotihook/signalk-stw-heel-correction.git#<commit>
+sudo systemctl restart signalk
+```
+
+Pin the ref: npm will not re-fetch a git dependency whose version has not changed.
 
 For working on the plugin rather than just running it, clone it and install from the working copy so a `git pull` is all the server needs:
 
