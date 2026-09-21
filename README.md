@@ -254,6 +254,10 @@ The one exception is the minimum-speed threshold: below it the plugin still publ
 
 ---
 
+## Changelog
+
+What changed in each release is in [CHANGELOG.md](CHANGELOG.md).
+
 ## Licence
 
 Apache-2.0. See [LICENSE](LICENSE).
