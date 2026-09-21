@@ -10,6 +10,8 @@ You then rank this plugin above the raw sensor in the server's **Source Prioriti
 
 Alternatively it can publish to a separate `navigation.speedThroughWaterCorrected` path, leaving the raw value alone — see **Output path** below.
 
+![The plugin's settings in the Signal K admin UI, correcting live at 19° of heel](docs/screenshots/config.png)
+
 ---
 
 ## Why heel correction matters
@@ -123,7 +125,7 @@ STW 6.00 kn, heel -10.3° → correction -0.0154 kn → corrected 5.98 kn
 ## Tests
 
 ```bash
-npm test          # node --test test/
+npm test          # node --test
 ```
 
 Covers table parsing and the paste-damage cases, interpolation and clamping, the output-path settings, both loop guards, the sensor-plausibility rules and the subscribe retry.

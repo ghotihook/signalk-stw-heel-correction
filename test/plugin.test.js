@@ -9,7 +9,7 @@ const KN = kn => kn / MS_TO_KN
 // A fake Signal K app: collects what the plugin publishes, says, and complains about.
 function harness (options = {}, attitude = { roll: -10 * RAD, ageMs: 0 }) {
   const published = [], meta = [], statuses = [], errors = [], debug = []
-  let onDelta = null, sm = null
+  let onDelta = null
   const app = {
     debug: m => debug.push(m),
     error: m => errors.push(m),
@@ -28,15 +28,16 @@ function harness (options = {}, attitude = { roll: -10 * RAD, ageMs: 0 }) {
       if (u.meta) meta.push(...u.meta.map(x => x.path))
       else published.push({ id, values: u.values, timestamp: u.timestamp })
     },
-    get subscriptionmanager () { return sm }
+    subscriptionmanager: {
+      subscribe: (s, unsub, onErr, cb) => { onDelta = cb; unsub.push(() => { onDelta = null }) }
+    }
   }
   const plugin = factory(app)
   plugin.start(options)
-  sm = { subscribe: (s, unsub, onErr, cb) => { onDelta = cb; unsub.push(() => { onDelta = null }) } }
   return {
     plugin, published, meta, statuses, errors, debug, app,
     attitude (next) { attitude = next },
-    ready: () => new Promise(r => setTimeout(r, 700)),
+    ready: () => Promise.resolve(),
     // returns the paths published for this delta, or null if the plugin stayed quiet
     feed (kn, source = 'paddlewheel') {
       if (!onDelta) return null
@@ -190,7 +191,8 @@ test('starts with no options at all', () => {
   assert.doesNotThrow(() => factory(app).start())
 })
 
-test('subscribes late if subscriptionmanager is not ready yet', async () => {
+test('subscribes late if subscriptionmanager is not ready yet', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
   let subscribed = false
   const app = { debug(){}, error(){}, setPluginError(){}, setPluginStatus(){},
     getSelfPath: () => undefined, handleMessage(){}, subscriptionmanager: undefined }
@@ -198,7 +200,7 @@ test('subscribes late if subscriptionmanager is not ready yet', async () => {
   plugin.start({})
   assert.strictEqual(subscribed, false)
   app.subscriptionmanager = { subscribe: (s, u) => { subscribed = true; u.push(() => {}) } }
-  await new Promise(r => setTimeout(r, 900))
+  t.mock.timers.tick(500)
   assert.strictEqual(subscribed, true)
   plugin.stop()
 })

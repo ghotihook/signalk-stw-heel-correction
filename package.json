@@ -4,7 +4,7 @@
   "description": "Signal K plugin that corrects speed through water for heel angle from a 2D interpolation table, republishing it under its own source so source priorities can rank it above the raw paddlewheel",
   "main": "index.js",
   "scripts": {
-    "test": "node --test test/"
+    "test": "node --test"
   },
   "keywords": [
     "signalk-node-server-plugin",
@@ -20,12 +20,17 @@
   "signalk-plugin-enabled-by-default": false,
   "signalk": {
     "displayName": "STW Heel Correction",
-    "appIcon": "./icon.svg"
+    "appIcon": "./icon.svg",
+    "screenshots": [
+      "./docs/screenshots/config.png"
+    ]
   },
   "files": [
     "index.js",
     "icon.svg",
-    "public/"
+    "public/",
+    "docs/screenshots/",
+    "CHANGELOG.md"
   ],
   "engines": {
     "node": ">=18"
