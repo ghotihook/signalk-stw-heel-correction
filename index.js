@@ -37,6 +37,14 @@ const MAX_CLOCK_SKEW_MS = 1000
 // bit-exact, so without this a zero correction records float noise as an "output"
 // and the next identical raw sample gets mistaken for an echo of it.
 const ECHO_MIN_DELTA_MS = 1e-6
+// Circuit breaker: the corrected value is never published more often than this (20 Hz).
+// A feedback loop through another plugin delivers its next update within the same
+// millisecond, so the chain ends at the first repeat rather than running away, and the
+// server stays responsive. Nothing latches; the status says while it is happening.
+const MIN_PUBLISH_INTERVAL_MS = 50
+const RATE_NOTE_MS = 10000 // how long a dropped update keeps the status flagged
+// How long without a sensor sample before the status points at STW from other plugins.
+const NO_SENSOR_MS = 3000
 
 // A blank cell means "no data for this heel/speed combination" — typically a corner
 // of the grid the boat never occupies. Extend the nearest known value into it rather
@@ -224,6 +232,11 @@ module.exports = function (app) {
         ],
         default: 'standard'
       },
+      inputSource: {
+        type: 'string',
+        title: 'Input source — the $source to correct, e.g. "nmea0183-tcp.II" or "can0.115". Leave blank to read sensors only: STW from data connections, never STW another plugin has published.',
+        default: ''
+      },
       minSpeedKn: {
         type: 'number',
         title: 'Minimum speed (knots) to apply the correction — below this the raw STW is passed through uncorrected',
@@ -259,6 +272,7 @@ module.exports = function (app) {
       return
     }
 
+    const inputSource = typeof options.inputSource === 'string' ? options.inputSource.trim() : ''
     const minSpeedKn = Number.isFinite(options.minSpeedKn) ? options.minSpeedKn : DEFAULT_MIN_SPEED_KN
 
     const outputPath = options.outputPath || 'standard'
@@ -305,6 +319,37 @@ module.exports = function (app) {
       return recentOutputs.some(o => Math.abs(o - ms) < 1e-12)
     }
 
+    // A plugin publishes with no source object, so the server gives its update only a
+    // $source. Data from a connection (NMEA 0183, NMEA 2000) always carries one. Another
+    // plugin's STW is already corrected, and if it takes this plugin's STW in turn, the
+    // two correct each other without end; so by default only sensors are read.
+    const fromSensor = update => update.source != null && typeof update.source === 'object'
+    const wanted = update => inputSource ? update.$source === inputSource : fromSensor(update)
+    let lastWantedAt = 0
+
+    // Rate limit (see MIN_PUBLISH_INTERVAL_MS): when the value was last published, and
+    // when updates were dropped recently, for the status.
+    let publishedAt = -Infinity
+    const dropsAt = []
+    let dropFrom = ''
+    function recentDrops(now) {
+      while (dropsAt.length && now - dropsAt[0] > RATE_NOTE_MS) dropsAt.shift()
+      return dropsAt.length
+    }
+    function noteDrop(now, from) {
+      const first = !recentDrops(now)
+      dropsAt.push(now)
+      dropFrom = from
+      if (!first) return
+      app.error(`Rate limited: "${from}" is arriving faster than ${1000 / MIN_PUBLISH_INTERVAL_MS} Hz. Is another plugin correcting this plugin's output?`)
+      app.setPluginStatus(lastDetail + rateNote(now)) // flag it now, not at the next refresh
+    }
+    function rateNote(now) {
+      const n = recentDrops(now)
+      return n ? ` · Rate limited: ${n} update${n === 1 ? '' : 's'} over ${1000 / MIN_PUBLISH_INTERVAL_MS} Hz not published in the last ${RATE_NOTE_MS / 1000} s, ` +
+        `from "${dropFrom}". Usually a feedback loop with another STW plugin: check Input source` : ''
+    }
+
     // What happens to consumers while the plugin is not publishing depends on
     // whether anything else is serving the path.
     const fallback = writesStandardPath
@@ -315,21 +360,32 @@ module.exports = function (app) {
     // numbers in the correcting status keep moving.
     let lastState = null
     let lastStatusAt = 0
+    let lastDetail = ''
     function reportState(state, detail) {
       const now = Date.now()
       if (state === lastState && now - lastStatusAt < STATUS_INTERVAL_MS) return
       lastState = state
       lastStatusAt = now
-      app.setPluginStatus(detail)
+      lastDetail = detail
+      app.setPluginStatus(detail + rateNote(now))
     }
 
     function onDelta(delta) {
       for (const update of (delta.updates || [])) {
         if (isOwnSource(update.$source)) continue
+        if (!wanted(update)) {
+          if (Date.now() - lastWantedAt > NO_SENSOR_MS) {
+            reportState('notwanted', inputSource
+              ? `Waiting for ${STW_PATH} from "${inputSource}" — ignoring "${update.$source}"`
+              : `Ignoring ${STW_PATH} from "${update.$source}", which is not a sensor (another plugin?). Set Input source to use it`)
+          }
+          continue
+        }
 
         for (const v of (update.values || [])) {
           if (v.path !== STW_PATH) continue
           if (v.value == null || !Number.isFinite(v.value)) continue
+          lastWantedAt = Date.now()
 
           if (isOwnEcho(v.value)) {
             if (!loopWarned) {
@@ -405,6 +461,13 @@ module.exports = function (app) {
 
           const correctedKn = Math.max(0, stwKn + correctionKn)
           const correctedMs = correctedKn / MS_TO_KN
+
+          const now = Date.now()
+          if (now - publishedAt < MIN_PUBLISH_INTERVAL_MS) {
+            noteDrop(now, update.$source)
+            continue
+          }
+          publishedAt = now
 
           if (writesStandardPath && Math.abs(correctedMs - v.value) > ECHO_MIN_DELTA_MS) {
             noteOutput(correctedMs)

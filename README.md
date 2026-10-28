@@ -87,6 +87,12 @@ This applies to the **standard** and **both** output settings. With the correcte
 
 Priorities also cover the plugin going quiet — if it is disabled, the server restarts, or the heel sensor drops out, consumers fall back to the raw sensor, so STW never goes away entirely.
 
+### Running alongside other STW plugins
+
+Only one plugin should correct STW, or the correction is applied twice even without a loop. If another plugin also corrects STW (for example `signalk-performance-processor`), turn the correction off in one of them. To chain them deliberately, the downstream plugin names the upstream one as its input source, and the upstream one reads the paddlewheel only (the default).
+
+`signalk-performance-processor` in Shadow mode also publishes `navigation.speedThroughWaterCorrected`, so with this plugin's corrected-path output the two overwrite each other there.
+
 ---
 
 ## Development workflow
@@ -128,7 +134,7 @@ STW 6.00 kn, heel -10.3° → correction -0.0154 kn → corrected 5.98 kn
 npm test          # node --test
 ```
 
-Covers table parsing and the paste-damage cases, interpolation and clamping, the output-path settings, both loop guards, the sensor-plausibility rules and the subscribe retry.
+Covers table parsing and the paste-damage cases, interpolation and clamping, the output-path settings, both loop guards, the rate limit, the input-source choice, the sensor-plausibility rules and the subscribe retry.
 
 ---
 
@@ -146,6 +152,9 @@ The plugin's status in the admin UI says what it is doing right now, refreshed a
 | `Not publishing — heel timestamp is ahead of server time, …` | The attitude source's clock disagrees with the server's, so its age cannot be trusted |
 | `Not publishing — heel of 172° is not plausible, …` | Heel beyond ±90°. Usually means roll is being published in degrees where Signal K expects radians |
 | `Not publishing — raw STW of -5.0 kn is not plausible, …` | A negative or absurd speed from the sensor |
+| `Ignoring navigation.speedThroughWater from "…", which is not a sensor …` | STW is arriving only from another plugin, which a blank Input source ignores. Set Input source to use it deliberately |
+| `Waiting for navigation.speedThroughWater from "…" — ignoring "…"` | Input source is set, and nothing is arriving from it |
+| `… · Rate limited: 4 updates over 20 Hz not published in the last 10 s, from "…"` | STW is arriving faster than 20 Hz, so some samples were not republished. Brief after a dropout is normal; if it stays, another plugin is probably correcting this one's output. Check **Input source** |
 | `Correction table: …` (error) | The table could not be parsed; the message names the offending cell |
 
 ---
@@ -157,6 +166,7 @@ The plugin ships with a default correction table measured on a 36 ft racer/cruis
 | Setting | Default | Description |
 |---|---|---|
 | **Output path** | `navigation.speedThroughWater` | Standard path, separate corrected path, or both — see above |
+| **Input source** | blank (sensors only) | The `$source` to correct, e.g. `nmea0183-tcp.II` or `can0.115`. Blank reads STW from data connections only, never STW another plugin has published. See **Running alongside other STW plugins** |
 | **Minimum speed (knots)** | `1.0` | Below this raw STW, no correction is applied — `corrected = raw`. Still published, so the plugin does not flap in and out around the threshold. |
 | **Correction table** | (built-in example) | Labeled CSV, see below |
 
@@ -220,12 +230,12 @@ A table that cannot be parsed — a ragged row, a non-numeric entry, no numbers 
 
 The plugin subscribes to `navigation.speedThroughWater` via `app.subscriptionmanager.subscribe` with **`sourcePolicy: 'all'`**, which delivers every sample from every source at full rate with no priority cascade on the input feed. On each value:
 
-1. The value is skipped if it came from this plugin's own `$source` (loop guard), or if it is null or non-finite — **nothing is published**
+1. The value is skipped if it came from this plugin's own `$source` (loop guard), from a source other than the configured input (by default, anything that is not a sensor), or if it is null or non-finite — **nothing is published**
 2. STW is converted from m/s to knots and checked for plausibility (see **Bad sensor data**); an implausible reading is dropped
 3. Current `navigation.attitude` roll is read via `getSelfPath` and converted from radians to degrees. If it is missing, non-finite, implausible, more than 1 s old, or dated in the future, the plugin **publishes nothing** for that sample
 4. If STW is below the configured minimum speed the correction is forced to zero (`corrected = raw`); otherwise it is bilinearly interpolated from the table at (heel °, BSP kn), with inputs outside the bin range clamped to the nearest edge
 5. `corrected = max(0, raw + correction)` — the result is floored at zero
-6. The corrected value is published to the configured output path(s) via `app.handleMessage(plugin.id, ...)`, carrying the source delta's timestamp
+6. The corrected value is published to the configured output path(s) via `app.handleMessage(plugin.id, ...)`, carrying the source delta's timestamp, unless the last one went out less than 50 ms ago (see **Circuit breaker** below)
 
 ### Bad sensor data
 
@@ -251,6 +261,10 @@ The one exception is the minimum-speed threshold: below it the plugin still publ
 - **Subscribe-and-republish, not `registerDeltaInputHandler`.** An input handler is for modifying a delta in place as it passes through, not for republishing a value under your own source. A correction plugin emits under its own `$source` and lets source priority choose between that and the raw source. (This plugin used an input handler until the source-priority rework made the subscribe path viable.)
 
 - **Loop guard** (only relevant when publishing to the standard path). Deltas published with no explicit `source` object get `$source` set to `plugin.id` by the server, and the plugin skips those. As a backstop it also remembers recently published values that differed from their input, and refuses to re-correct one that comes back under an unexpected `$source` — logging the offending source once, since an unbroken loop on the primary STW path is the failure mode that matters most here. If you ever feed an external NMEA source carrying this plugin's corrected value back into Signal K as `navigation.speedThroughWater`, that backstop is what catches it.
+
+- **Sensors only, by default.** Skipping your own `$source` is enough while you are the only corrector. With two, say this plugin and `signalk-performance-processor`, each takes the other's output as its input, corrects it again and hands it back, and STW runs away. `$source` names who published a value, not what it was derived from, so the only reliable guard is to choose the input by where it came from. A plugin publishes with no `source` object, while data from a connection (NMEA 0183, NMEA 2000) always carries one; a blank **Input source** takes only the latter. Setting **Input source** names one `$source` instead, which may be another plugin for a deliberate one-way chain.
+
+- **Circuit breaker.** Whatever the input, the plugin never publishes more often than 20 Hz: an update less than 50 ms after the last one is not published. A loop's next hop arrives within the same millisecond, so the chain ends at the first repeat instead of running away, and the server stays responsive. A backlog flushed after a dropout is thinned, not stopped. Nothing latches. The status says while it is happening.
 
 ---
 

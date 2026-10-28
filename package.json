@@ -1,6 +1,6 @@
 {
   "name": "signalk-stw-heel-correction",
-  "version": "0.2.3",
+  "version": "0.3.0",
   "description": "Corrects paddlewheel speed through water for heel using your own heel × speed calibration table. Publishes on the same path under its own source, so every display, logbook and autopilot gets the corrected value.",
   "main": "index.js",
   "scripts": {

@@ -6,6 +6,13 @@ const MS_TO_KN = 1.94384
 const RAD = Math.PI / 180
 const KN = kn => kn / MS_TO_KN
 
+// A clock the tests move. Each sample arrives 100 ms after the last, as from a 10 Hz
+// sensor, unless a test says otherwise; the publish rate limit depends on it.
+let clock = Date.parse('2026-01-01T00:00:00Z')
+Date.now = () => clock
+
+const sourceObject = src => src.startsWith('signalk-') ? {} : { source: { label: src.split('.')[0], type: 'NMEA0183' } }
+
 // A fake Signal K app: collects what the plugin publishes, says, and complains about.
 function harness (options = {}, attitude = { roll: -10 * RAD, ageMs: 0 }) {
   const published = [], meta = [], statuses = [], errors = [], debug = []
@@ -39,17 +46,21 @@ function harness (options = {}, attitude = { roll: -10 * RAD, ageMs: 0 }) {
     attitude (next) { attitude = next },
     ready: () => Promise.resolve(),
     // returns the paths published for this delta, or null if the plugin stayed quiet
-    feed (kn, source = 'paddlewheel') {
+    // Sensors arrive with a source object, as from a data connection; a source named
+    // like a plugin arrives without one, as a plugin's output does.
+    feed (kn, source = 'paddlewheel', afterMs = 100) {
       if (!onDelta) return null
+      clock += afterMs
       const before = published.length
-      onDelta({ updates: [{ $source: source, timestamp: '2026-01-01T00:00:00.000Z',
+      onDelta({ updates: [{ $source: source, ...sourceObject(source), timestamp: '2026-01-01T00:00:00.000Z',
         values: [{ path: 'navigation.speedThroughWater', value: KN(kn) }] }] })
       return published.length > before ? published[published.length - 1] : null
     },
     feedRaw (value, source = 'paddlewheel') {
       if (!onDelta) return null
+      clock += 100
       const before = published.length
-      onDelta({ updates: [{ $source: source, timestamp: 't',
+      onDelta({ updates: [{ $source: source, ...sourceObject(source), timestamp: 't',
         values: [{ path: 'navigation.speedThroughWater', value }] }] })
       return published.length > before ? published[published.length - 1] : null
     },
@@ -168,7 +179,7 @@ test('passes the raw value through below the minimum speed', async () => {
 
 test('tolerates an unwrapped attitude object', async () => {
   const h = harness(); await h.ready()
-  h.attitude({ raw: { roll: -10 * RAD, timestamp: new Date().toISOString() } })
+  h.attitude({ raw: { roll: -10 * RAD, timestamp: new Date(Date.now()).toISOString() } })
   assert.ok(h.feed(6), 'should still correct')
 })
 
@@ -220,4 +231,42 @@ test('status says what it is doing', async () => {
   h.attitude(null)
   h.feed(6)
   assert.ok(h.statuses.some(s => /Not publishing — no heel data/.test(s)))
+})
+
+test('reads sensors only by default, ignoring STW another plugin published', async () => {
+  const h = harness()
+  await h.ready()
+  assert.strictEqual(h.feed(6, 'signalk-performance-processor'), null)
+  assert.match(h.statuses[h.statuses.length - 1], /not a sensor/)
+  assert.ok(h.feed(6, 'paddlewheel'))
+})
+
+test('reads only the chosen input source when one is set, plugin or not', async () => {
+  const h = harness({ inputSource: 'signalk-other' })
+  await h.ready()
+  assert.strictEqual(h.feed(6, 'paddlewheel'), null)
+  assert.ok(h.feed(6, 'signalk-other'))
+})
+
+test('a loop is cut at the first repeat, flagged in the status, and never locks up', async () => {
+  const h = harness({ inputSource: 'signalk-other' })
+  await h.ready()
+  for (let k = 0; k < 5; k++) {
+    assert.ok(h.feed(6, 'signalk-other', 300), 'a new sample goes out')
+    assert.strictEqual(h.feed(6.02, 'signalk-other', 0), null, 'its echo, the same millisecond, does not')
+  }
+  assert.match(h.statuses[h.statuses.length - 1], /Rate limited: \d+ updates? .* "signalk-other"/)
+  assert.strictEqual(h.errors.filter(e => /Rate limited/.test(e)).length, 1, 'logged once per episode')
+})
+
+test('a burst is thinned to 20 Hz, not stopped, and the flag clears', async () => {
+  const h = harness()
+  await h.ready()
+  let published = 0
+  for (let i = 0; i < 300; i++) if (h.feed(5 + i * 0.00137, 'paddlewheel', 1)) published++
+  assert.ok(published >= 6 && published <= 7, `${published} of 300 published over 0.3 s`)
+  for (let i = 0; i < 5; i++) assert.ok(h.feed(6 + i * 0.01), 'normal rate again: every sample goes out')
+  assert.match(h.statuses[h.statuses.length - 1], /Rate limited/)
+  h.feed(6.5, 'paddlewheel', 11000)
+  assert.doesNotMatch(h.statuses[h.statuses.length - 1], /Rate limited/)
 })
